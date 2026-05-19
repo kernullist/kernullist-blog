@@ -1,0 +1,164 @@
+# The Site Configuration
+
+# Import the theme
+theme: jekyll-theme-chirpy
+
+# The language of the webpage
+lang: en
+
+# Change to your timezone › https://zones.arilyn.cc
+timezone: Asia/Seoul
+
+# jekyll-seo-tag settings
+title: Kernullist's Blog
+
+tagline: Security research, game hacking, and tech notes.
+
+description: >-
+  A blog about security research, game development internals, and technical deep dives.
+
+# Fill in the protocol & hostname for your site.
+url: "https://kernullist.github.io/kernullist-blog"
+
+github:
+  username: kernullist
+
+social:
+  name: kernullist
+  email: kernullist@ironmace.com
+  links:
+    - https://github.com/kernullist
+
+# Site Verification Settings
+webmaster_verifications:
+  google:
+  bing:
+
+# Web Analytics Settings
+analytics:
+  google:
+    id:
+
+# Prefer color scheme setting.
+# Note: Keep empty will follow the system prefer color by default,
+# and there will be a toggle to switch the theme between dark and light
+# on the bottom left of the sidebar.
+#
+# Available options:
+#
+#     light  - Use the light color scheme
+#     dark   - Use the dark color scheme
+#
+theme_mode: # [light | dark]
+
+# The CDN endpoint for media resources.
+# Notice that once it ends with '/', Jekyll will automatically add the site.baseurl before it,
+# so please omit the trailing '/'.
+cdn:
+
+# the avatar on sidebar, support local or CORS resources
+avatar:
+
+# The URL of the website's social preview image used on Open Graph and Twitter Cards.
+social_preview_image:
+
+# boolean type, the global switch for posts TOC
+toc: true
+
+comments:
+  # Global switch for the post comment system. Keeping it empty means disabled.
+  provider: # [disqus | utterances | giscus]
+
+assets:
+  self_host:
+    enabled: # boolean, keep empty means false
+    env: # [development | production]
+    extensions: # [css | js]
+
+pwa:
+  enabled: true
+  cache:
+    enabled: true
+    deny_paths:
+
+paginate: 10
+
+# The base URL of your site
+baseurl: "/kernullist-blog"
+
+# ------------ The following options are not recommended to be modified ------------------
+
+kramdown:
+  footnote_backlink: "&#8617;&#xfe0e;"
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: highlight
+    span:
+      line_numbers: false
+    block:
+      line_numbers: true
+      start_line: 1
+
+collections:
+  tabs:
+    output: true
+    sort_by: order
+
+defaults:
+  - scope:
+      path: ""
+      type: posts
+    values:
+      layout: post
+      comments: true
+      toc: true
+      permalink: /posts/:title/
+  - scope:
+      path: _drafts
+    values:
+      comments: false
+  - scope:
+      path: ""
+      type: tabs
+    values:
+      layout: page
+      permalink: /:title/
+  - scope:
+      path: assets/img/favicons
+    values:
+      swcache: true
+  - scope:
+      path: assets/js/dist
+    values:
+      swcache: true
+
+sass:
+  style: compressed
+
+compress_html:
+  clippings: all
+  comments: all
+  endings: all
+  profile: false
+  blanklines: false
+  ignore:
+    envs: [development]
+
+exclude:
+  - "*.gem"
+  - "*.gemspec"
+  - docs
+  - tools
+  - README.md
+  - LICENSE
+  - "*.config.js"
+  - package*.json
+
+jekyll-archives:
+  enabled: [categories, tags]
+  layouts:
+    category: category
+    tag: tag
+  permalinks:
+    tag: /tags/:name/
+    category: /categories/:name/
