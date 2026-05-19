@@ -57,7 +57,7 @@ theme_mode: # [light | dark]
 cdn:
 
 # the avatar on sidebar, support local or CORS resources
-avatar:
+avatar: /assets/img/avatar.png
 
 # The URL of the website's social preview image used on Open Graph and Twitter Cards.
 social_preview_image:
