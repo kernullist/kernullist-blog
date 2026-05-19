@@ -8,7 +8,7 @@ order: 4
 
 Hi, I'm **kernullist** — a security researcher and game tech enthusiast.
 
-I work at Iron Mace, and this blog is where I write about things I find interesting:
+This blog is where I write about things I find interesting:
 
 - Reverse engineering and game internals
 - Security research and vulnerability analysis
