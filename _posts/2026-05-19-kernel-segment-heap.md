@@ -407,8 +407,8 @@ Key changes:
 
 ```c
 // Migration example
-// Before: ExAllocatePoolWithTag(NonPagedPoolNx, size, 'Tvk0') + RtlZeroMemory(...)
-// After:  ExAllocatePool2(POOL_FLAG_NON_PAGED_EXECUTE, size, 'Tvk0')
+// Before: ExAllocatePoolWithTag(NonPagedPoolNx, size, 'Exm0') + RtlZeroMemory(...)
+// After:  ExAllocatePool2(POOL_FLAG_NON_PAGED_EXECUTE, size, 'Exm0')
 ```
 
 ### 8.3 `ExAllocatePool3`
