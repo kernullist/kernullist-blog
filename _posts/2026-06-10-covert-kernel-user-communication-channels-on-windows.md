@@ -2582,7 +2582,7 @@ When the cheat surface lives outside the gaming PC, software anti-cheat is struc
 
 External DMA hardware reads or writes system memory without normal in-OS APIs. PCIe DMA cards installed in the gaming PC (typically M.2 NVMe slots) issue Memory Read TLPs against game memory, transferring contents to a second machine over USB or network. There is no in-game module, or only a small overlay/input component on the host.
 
-This is the dominant high-end FPS cheat surface. The dedicated DMA companion document (`pcie_dma_spoofing_detection_v8.md`) treats this surface in depth. Summarized here:
+This is the dominant high-end FPS cheat surface. The dedicated DMA companion post, [About PCIe DMA Cheats: Protocol, IOMMU, Hardware, and Detection](https://kernullist.github.io/kernullist-blog/posts/pcie-dma-cheats/), treats this surface in depth. Summarized here:
 
 **Detection.**
 
@@ -3227,4 +3227,4 @@ These are not strictly corrections but operationally relevant detail that v7 mad
 
 ### Companion Document
 
-- `pcie_dma_spoofing_detection_v8.md`: protocol-level DMA card detection, IOMMU enforcement architecture, attestation, and forensic capture.
+- [About PCIe DMA Cheats: Protocol, IOMMU, Hardware, and Detection](https://kernullist.github.io/kernullist-blog/posts/pcie-dma-cheats/): protocol-level DMA card detection, IOMMU enforcement architecture, attestation, and forensic capture.
