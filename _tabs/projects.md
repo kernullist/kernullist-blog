@@ -61,7 +61,7 @@ A compact index of tools and side projects I build alongside Windows security re
 
 ## Research Tools
 
-Tools for kernel inspection, reverse engineering, anti-cheat research, and evidence-backed Windows security workflows.
+Tools for kernel inspection, ETW telemetry research, reverse engineering, anti-cheat research, and evidence-backed Windows security workflows.
 
 <div class="project-grid">
   <article class="project-card">
@@ -72,6 +72,16 @@ Tools for kernel inspection, reverse engineering, anti-cheat research, and evide
       <span>Verification</span>
     </div>
     <p>Project intelligence and fuzzing workbench for Windows security, anti-cheat engineering, and evidence-backed verification.</p>
+  </article>
+
+  <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/ETWPrism">ETWPrism</a></div>
+    <div class="project-tags">
+      <span>User-Mode ETW</span>
+      <span>Telemetry Lab</span>
+      <span>Rust</span>
+    </div>
+    <p>Rust-based lab for intercepting, inspecting, blocking, and modifying selected user-mode ETW event streams inside instrumented processes.</p>
   </article>
 
   <article class="project-card">
