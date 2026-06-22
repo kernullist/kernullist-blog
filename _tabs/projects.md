@@ -85,6 +85,16 @@ Tools for kernel inspection, ETW telemetry research, reverse engineering, anti-c
   </article>
 
   <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/KnWin32ApiMonitor">KnWin32ApiMonitor</a></div>
+    <div class="project-tags">
+      <span>Win32 API</span>
+      <span>Monitoring</span>
+      <span>RE / Debugging</span>
+    </div>
+    <p>Modern Win32 API monitor for Windows security, reverse engineering, debugging, and anti-cheat research.</p>
+  </article>
+
+  <article class="project-card">
     <div class="project-title"><a href="https://github.com/kernullist/kn-live-dbg">kn-live-dbg</a></div>
     <div class="project-tags">
       <span>Kernel</span>
@@ -193,6 +203,16 @@ Small applications, AI workflow experiments, desktop utilities, and local-first 
   </article>
 
   <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/CodersRoundTable">CodersRoundTable</a></div>
+    <div class="project-tags">
+      <span>Code Review</span>
+      <span>AI Personas</span>
+      <span>RPG UI</span>
+    </div>
+    <p>Gamified code review tool where multiple tech personas debate source code with speech bubbles, line highlights, and retro visuals.</p>
+  </article>
+
+  <article class="project-card">
     <div class="project-title"><a href="https://github.com/kernullist/Codex-get-some-rest">Codex-get-some-rest</a></div>
     <div class="project-tags">
       <span>Codex</span>
@@ -234,6 +254,16 @@ Small applications, AI workflow experiments, desktop utilities, and local-first 
       <span>Windows</span>
     </div>
     <p>Lightweight Windows utility that dims inactive screens and background windows while keeping the active window visible.</p>
+  </article>
+
+  <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/OhMyDisplay">OhMyDisplay</a></div>
+    <div class="project-tags">
+      <span>Display</span>
+      <span>Power</span>
+      <span>Tray Utility</span>
+    </div>
+    <p>Windows tray utility that solves recurring display and power annoyances with a small local-first control surface.</p>
   </article>
 
   <article class="project-card">
@@ -288,6 +318,26 @@ Small applications, AI workflow experiments, desktop utilities, and local-first 
       <span>FastAPI</span>
     </div>
     <p>Korean AI news podcast generator powered by Gemini, ElevenLabs, and FastAPI.</p>
+  </article>
+
+  <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/dewdrop-canvas">dewdrop-canvas</a></div>
+    <div class="project-tags">
+      <span>Thought Board</span>
+      <span>Generative AI</span>
+      <span>Canvas</span>
+    </div>
+    <p>Tactile liquid brain-mapping and generative AI thought synthesis board for exploring ideas visually.</p>
+  </article>
+
+  <article class="project-card">
+    <div class="project-title"><a href="https://github.com/kernullist/my-teacher">my-teacher</a></div>
+    <div class="project-tags">
+      <span>English</span>
+      <span>Pronunciation</span>
+      <span>AI Coach</span>
+    </div>
+    <p>AI-powered web application for practicing and improving English pronunciation with guided feedback.</p>
   </article>
 
   <article class="project-card">
