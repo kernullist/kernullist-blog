@@ -50,49 +50,6 @@ This document avoids loader instructions, exploit chains, game offsets, bypass c
 
 ---
 
-### Research Claim Contract
-
-Every technical sentence in this document should be read as a bounded claim, not as a slogan. A mechanism name such as EPT, NPT, PASID, TDISP, GPU-PV, or CXL is not evidence by itself. The sentence has to say which authority owns the fact, which state carrier records it, which transition or epoch consumed it, which observer saw it, which experiment would falsify it, and where the claim must stop.
-
-For review, the contract is a publishability predicate: source vocabulary, native state carrier, owner, epoch, promotion bridge, benign alternative, falsification experiment, and claim ceiling all have to be named before a sentence is allowed to sound stronger than its evidence.
-
-```text
-research_claim_is_publishable =
-  source_vocabulary_is_current
-  and native_state_carrier_is_named
-  and owner_and_epoch_are_bound
-  and promotion_bridge_is_explicit
-  and benign_or_lower_authority_alternatives_are_named
-  and minimum_falsification_experiment_is_possible
-  and claim_ceiling_stops_at_first_unpaid_authority
-```
-
-This is the rule that keeps the document useful for both offensive mechanism analysis and defensive engineering. It allows a section to explain why a primitive is powerful while refusing to overstate which authority that primitive owns.
-
-Use the following verb ladder to keep wording tied to evidence authority instead of confidence style:
-
-| Verb class | Allowed meaning | Required bridge before promotion |
-|---|---|---|
-| names | identifies a field, protocol, tool, paper, or mechanism | source anchor and vocabulary boundary |
-| observes | records an artifact under a named observer and epoch | raw artifact, observer identity, timebase, and mutation budget |
-| supports | artifact is consistent with a hypothesis | at least one alternate benign explanation is still open |
-| corroborates | independent owner or backend agrees under a bounded setup | independent timebase, backend, route, or semantic witness |
-| proves | all authorities named by the sentence are joined and falsifiers survive | invariant, native artifact, replay or negative control, and closed competing explanations |
-| does not prove | explicitly preserves a missing bridge | first unpaid authority and maximum claim ceiling |
-
-Publication review should rewrite unsafe wording by naming the first unpaid authority and the maximum defensible claim ceiling:
-
-| Unsafe sentence | Research-grade sentence |
-|---|---|
-| "An EPT fault proves the cheat read player memory." | "A read-qualified EPT-violation candidate occurred under EPTP X; process ownership, object lifetime, and delivery authority remain unpaid." |
-| "A DMA device read the game process." | "A requester/PASID/domain transaction candidate exists; CPU translation, Windows page-state, and engine semantic joins are not yet closed." |
-| "Server behavior proves a hypervisor cheat." | "Replay behavior supports a hidden-information or input-assistance hypothesis; the local acquisition route remains unproven." |
-| "TEE-IO protects the endpoint." | "A trusted-device assignment envelope may exist for a named TDI and epoch; endpoint enforcement and game-memory authority require separate evidence." |
-
-This contract is intentionally conservative. It lets the document discuss advanced attack surfaces without turning them into construction guidance, and it keeps anti-cheat conclusions inside explicit claim boundaries with a falsifiable owner, epoch, and evidence path.
-
----
-
 ## Part I. Hypervisor Technology Fundamentals
 
 ### 1. Mental Model: Rings Are Not Enough
