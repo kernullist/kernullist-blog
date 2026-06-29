@@ -5,11 +5,11 @@ categories: [Windows Internals, Anti-Cheat]
 tags: [hypervisor, vmx, svm, vmcs, vmcb, anti-cheat, virtualization, windows]
 ---
 
-> Hypervisor cheats are not magic Ring -1 stories. They are ownership changes over CPU state, second-stage translation, event delivery, and evidence. This opening post builds the vocabulary for the rest of the series: who owns control, which state was actually consumed by the processor, and why static memory artifacts are not enough to prove a live hypervisor.
+> Hypervisor cheats are not magic Ring -1 stories. They are about who controls the CPU while Windows is running as a guest. This opening post keeps that idea concrete: which state did the processor actually use, and why a structure sitting in memory does not prove a live hypervisor by itself.
 
 ## Scope
 
-This part is the architectural foundation. It separates privilege rings from virtualization ownership, follows VMX/SVM control state into VMCS/VMCB fields, and frames later conclusions around authority, data path, invariant, failure mode, and observable evidence.
+This part is the architectural foundation. It separates privilege rings from virtualization ownership, explains VMCS/VMCB control state, and introduces one rule that will repeat through the series: a low-level observation is not a game fact until it is connected to Windows state, game state, and player-visible behavior.
 
 ---
 
@@ -17,17 +17,25 @@ This part is the architectural foundation. It separates privilege rings from vir
 
 ### Executive Summary
 
-Hypervisor-based game cheats should not be explained as a mysterious "Ring -1" trick. The real mechanism is ownership transfer: CPU virtualization creates control state below the guest operating system, and that state can mediate guest memory translation, selected CPU events, timing behavior, and device or input paths before Windows and the game consume them. The important question is not only "which ring is this code in?" but "which layer controlled the state that the CPU actually used?"
+Hypervisor-based game cheats should not be explained as a mysterious "Ring -1" trick. The real mechanism is simpler and more useful: CPU virtualization lets another layer control parts of the environment in which Windows runs. That layer can decide which events leave the guest, which physical page backs a guest physical address, and which timing or device behavior Windows is allowed to see.
 
-A below-OS observer can see CPU state, second-stage translation state, interrupt/timer state, device transactions, or guest memory bytes. None of those observations automatically proves a live game object, a player-visible fact, or a server-visible advantage. The missing work is always the bridge from hardware state to OS state, from OS state to engine meaning, and from engine meaning to player behavior.
+That does not mean every low-level observation is automatically meaningful to the game. A hypervisor can observe CPU state, translation state, timer state, device traffic, or raw bytes. To turn that into a cheat explanation, the analysis still has to connect three steps:
+
+```text
+hardware fact
+  -> Windows process fact
+  -> game object or player behavior fact
+```
+
+Skipping one of those steps is where many hypervisor-cheat explanations become confusing or overconfident.
 
 The series follows that bridge in order:
 
 1. **Hypervisor technology first.** VMX/SVM, VMCS/VMCB, VM-exits, EPT/NPT, address translation, VMI, and SMP/performance constraints define what is technically possible.
 2. **Cheat operation second.** A cheat turns those primitives into memory acquisition, game-object reconstruction, overlay/input delivery, and stealth consistency.
-3. **Anti-cheat response third.** Defensive reasoning should combine platform trust, virtualization consistency, memory-view checks, device/DMA posture, I/O evidence, and server-side behavior as separately owned evidence. A single local probe can support only the authority it observes, so broader cheat or enforcement wording requires explicit joins across those owners.
+3. **Anti-cheat response third.** Defensive reasoning combines platform trust, virtualization consistency, memory-view checks, device/DMA posture, I/O evidence, and server-side behavior. A single local probe should not be stretched beyond the layer it actually observed.
 
-This post avoids loader instructions, exploit chains, game offsets, bypass code, or implementation-ready cheat code. It focuses on technical mechanisms, state transitions, scope boundaries, failure modes, and defensive engineering.
+This post avoids loader instructions, exploit chains, game offsets, bypass code, or implementation-ready cheat code. It focuses on technical mechanisms, state transitions, where each conclusion applies, failure modes, and defensive engineering.
 
 ---
 
@@ -35,23 +43,34 @@ This post avoids loader instructions, exploit chains, game offsets, bypass code,
 
 ### 1. Mental Model: Rings Are Not Enough
 
-Traditional Windows cheat discussions often focus on rings, but rings answer only who can execute privileged code inside the guest. They do not identify the active virtualization owner, the second-stage translation root, the interrupt and timer route, the device-remapping domain, or the epoch that consumed a control object. Ring privilege is only one local capability; it does not by itself prove VMX/SVM ownership, a manipulated memory view, process-memory access, player knowledge, or server-visible impact.
+Traditional Windows cheat discussions often start with rings. That is useful, but incomplete. Rings tell us whether code is running in user mode or kernel mode inside Windows. They do not tell us whether Windows itself is running directly on the CPU or inside a virtualized environment.
 
 ```text
 Ring 3  user-mode game, overlay, launcher
 Ring 0  Windows kernel, drivers, anti-cheat driver
 ```
 
-Hardware virtualization adds a different ownership axis with a separate control state, event route, and translation authority. The phrase "below the kernel" is too weak unless the analysis also names the active VMCS/VMCB epoch, the EPT/NPT root defining the memory view, the interrupt fabric delivering events, and the device-remapping owner that allows or denies DMA.
+Hardware virtualization adds a second question:
+
+```text
+Who controls the environment that Windows is running inside?
+```
+
+That is the important part of "Ring -1." It is not just a lower privilege number. It is a separate control layer that can decide how the guest runs.
 
 ```text
 VMX root / SVM host       hypervisor control layer
 VMX non-root / SVM guest  Windows kernel and user-mode software
 ```
 
-The hypervisor is not simply "more privileged Ring 0." It controls the execution environment in which the guest OS runs. The guest still believes it owns CR3, page tables, interrupts, MSRs, timers, and memory permissions, but the CPU can route selected events to the hypervisor first.
+The guest still believes it owns CR3, page tables, interrupts, MSRs, timers, and memory permissions. A hypervisor can let most of that run normally, but ask the CPU to report selected events first.
 
-The core data path that must stay separated during analysis is an authority chain from game observation down to second-stage translation and hardware state. This chain is also separate from the delivery path that turns a cue into a player decision. Without that separation, "observed in memory" can be over-promoted into "the player used information outside legitimate visibility."
+Keep two paths separate:
+
+1. **Observation path:** how bytes, events, or timing were observed.
+2. **Delivery path:** how that information could reach a player, overlay, input helper, replay, or server-visible behavior.
+
+This separation matters because "read below Windows" is not the same sentence as "the player used hidden information."
 
 ```text
 Game and anti-cheat
@@ -61,68 +80,62 @@ Game and anti-cheat
   -> physical memory and hardware-facing state
 ```
 
-For anti-cheat, this means a malicious or untrusted hypervisor can move the cheat's artifacts outside the normal Windows model. The game process may have no injected DLL, no suspicious handle, and no modified guest page table, while a lower layer still reads or manipulates game state. The limit is just as important: a missing Windows artifact is not proof of absence, and a lower-layer read is not gameplay impact until process ownership, semantic interpretation, delivery, and replay/server consequence are connected.
+For anti-cheat, this means a malicious or untrusted hypervisor can move important artifacts outside the normal Windows model. The game process may have no injected DLL, no suspicious handle, and no modified guest page table, while a lower layer still observes memory or timing.
+
+The limit is just as important. A missing Windows artifact is not proof of absence. A lower-layer read is not gameplay impact until it is tied to a process, a game object, a delivery path, and a behavior or replay consequence.
 
 #### 1.1 What the Hypervisor Actually Owns
 
-The useful mental model is not "ring -1 is stronger than ring 0." The useful model is ownership of architectural contracts. A hypervisor owns the boundary conditions under which ring 0 executes.
-
-Ownership here has a precise meaning. The hypervisor does not automatically own every truth about the system, the Windows memory manager, the game engine, or the player. It owns the CPU and platform contracts that decide how the guest is allowed to run, which state is loaded or saved, which events are intercepted, which physical view backs a guest physical address, and which clocks or virtual devices are presented. Anything stronger has to connect that owned contract to the next layer.
+The useful mental model is not "Ring -1 is stronger than Ring 0." The useful model is narrower:
 
 ```text
-hypervisor_ownership_model =
-  architectural_contract
-  -> control_object_or_translation_root
-  -> guest_visible_illusion
-  -> observable_cross_check
-  -> unowned_authority_boundary
-  -> join_to_next_layer
+the hypervisor owns the conditions under which Ring 0 runs
 ```
 
-In practice, the word "owns" should answer four questions before the analysis moves to a higher layer:
+It can own execution rules, state transitions, second-stage memory translation, event delivery, selected timing behavior, and some platform/device presentation. It does not automatically own every truth about Windows, the game engine, the player, or the server.
 
-| Ownership question | Strong answer | Weak or overbroad answer |
+Before moving from a low-level fact to a game fact, ask four simple questions:
+
+| Question | Good answer | Weak answer |
 |---|---|---|
-| Which contract is owned? | execution, state, translation, event delivery, time, platform, or device boundary is named | "ring -1 owns everything" |
-| Which control object carries it? | VMCS, VMCB, EPTP, `N_CR3`, intercept bitmap, MSR policy, APIC virtualization state, IOMMU domain, or TLFS contract | generic "hypervisor state" |
-| Which guest-visible story should agree? | CPUID/MSR/CR/APIC/timer/page-table/Windows policy observer is named | one clean value is treated as full consistency |
-| Which authority remains unowned? | Windows page-state, engine semantics, delivery path, server truth, or player knowledge remains separate | lower-layer visibility is promoted directly to gameplay truth |
+| What is being controlled? | execution, memory translation, event delivery, time, or device view | "Ring -1 controls everything" |
+| What carries that control? | VMCS, VMCB, EPTP, `N_CR3`, intercept bitmap, MSR policy, or IOMMU domain | "some hypervisor state" |
+| Who can check the story? | guest code, kernel code, CPU payload, device path, or replay/server evidence | one clean value |
+| What is still unproven? | Windows ownership, game meaning, player visibility, or server impact | lower-layer visibility is treated as gameplay truth |
 
-| Owned contract | What the guest believes | What the hypervisor can actually control | Technical consequence |
+| Owned area | What the guest believes | What the hypervisor can actually control | Technical consequence |
 |---|---|---|---|
-| execution contract | privileged instructions, exceptions, interrupts, and returns behave like bare metal | selected instructions and events can be routed to VMX root or SVM host first | the guest can be correct locally while still running inside a constrained execution envelope |
-| state contract | CRs, DRs, MSRs, segment state, descriptor tables, and APIC state are the machine state | VMCS/VMCB state can virtualize, shadow, save, restore, or reject those values | detection cannot rely on one register story; related state must be cross-checked |
-| translation contract | CR3-selected page tables define process memory | guest virtual translation is only the first stage; EPT/NPT decides the final physical view | guest page tables can look clean while the second stage blocks, redirects, or observes access |
-| event contract | faults and interrupts are delivered according to architectural priority | exit controls, qualification fields, and reinjection paths can interpose on delivery | wrong event ordering is a stronger signal than a single suspicious value |
-| time contract | TSC, APIC timers, QPC, HPET, scheduler time, and network time are mutually plausible | TSC offset/scaling and timer exits can alter some clocks but not all observers equally | timer hiding is a coherence problem, not a single-field spoof |
-| platform contract | Windows observes a coherent boot, Hyper-V, VBS, device, and policy story | a VMM may coexist with or conflict with the platform's legitimate hypervisor/trust state | modern analysis must include Hyper-V/TLFS/VSM state, not just CPUID |
+| execution | privileged instructions, exceptions, interrupts, and returns behave like bare metal | selected instructions and events can be routed to VMX root or SVM host first | the guest can be correct locally while still running inside a constrained execution envelope |
+| state | CRs, DRs, MSRs, segment state, descriptor tables, and APIC state are the machine state | VMCS/VMCB state can virtualize, shadow, save, restore, or reject those values | detection cannot rely on one register story; related state must be cross-checked |
+| translation | CR3-selected page tables define process memory | guest virtual translation is only the first stage; EPT/NPT decides the final physical view | guest page tables can look clean while the second stage blocks, redirects, or observes access |
+| events | faults and interrupts are delivered according to architectural priority | exit controls, qualification fields, and reinjection paths can interpose on delivery | wrong event ordering is a stronger signal than a single suspicious value |
+| time | TSC, APIC timers, QPC, HPET, scheduler time, and network time are mutually plausible | TSC offset/scaling and timer exits can alter some clocks but not all observers equally | timer hiding is a coherence problem, not a single-field spoof |
+| platform | Windows observes a coherent boot, Hyper-V, VBS, device, and policy story | a VMM may coexist with or conflict with the platform's legitimate hypervisor/trust state | modern analysis must include Hyper-V/TLFS/VSM state, not just CPUID |
 
-This is why hypervisor analysis should start from contracts rather than artifacts. A DLL, handle, driver object, or guest PTE is only one possible manifestation. The deeper question is whether execution, state, translation, event delivery, time, and platform policy still describe one machine. A useful cross-check is to hold the guest workload constant and vary the observer: guest user-mode, guest kernel, CPU native payload, second-stage table replay, Hyper-V/TLFS observer where present, device or DMA posture, and gameplay/replay consequence. If those observers disagree, the analysis should name the first contract that broke instead of jumping straight to a cheat label.
+This is why hypervisor analysis should start from behavior, not artifacts. A DLL, handle, driver object, or guest PTE is only one possible clue. The better question is whether execution, state, translation, events, time, and platform policy still describe one coherent machine.
+
+If different observers disagree, name the first layer where the story breaks. That is stronger and clearer than jumping straight to a cheat label.
 
 #### 1.2 From Hardware Facts to Game Facts
 
-Each observation belongs to a specific layer. A CPU manual can define what an EPT violation means; it cannot prove which Windows process owned the byte. A Windows memory API can define region, residency, and read-access semantics; it cannot prove that the second-stage translation root was honest. An engine replay can prove server-visible consequence; it cannot prove how the local endpoint learned the hidden state.
+Each observation belongs to a specific layer. A CPU manual can define what an EPT violation means; it cannot prove which Windows process owned the byte. A Windows memory API can describe region and read rules; it cannot prove that the second-stage memory view was honest. A replay can show behavior; it cannot prove how the local endpoint learned the information.
 
-The table below keeps each observation at the layer it actually supports. Absence at one layer can disprove a narrow bridge, but it cannot disprove a broader mechanism unless the missing owner, epoch, and observer scope are named.
+Read the evidence as a ladder:
 
-| Layer | Source of truth | What it can prove | What it cannot prove alone | Needed bridge |
-|---|---|---|---|---|
-| CPU execution authority | VMCS/VMCB controls, VM-entry or `VMRUN` result, exit reason, event-injection state, interruptibility, vendor capability source | a guest event was configured, intercepted, injected, blocked, or resumed under a CPU contract | process ownership, object meaning, player knowledge, server consequence, or endpoint policy truth | guest mode, vCPU epoch, raw vendor payload, platform owner, and re-entry result |
-| First-stage translation authority | guest CR3, paging mode, PCID or ASID context, guest PTE chain, KVA split state, Windows address-space lifetime | a GVA translated to a GPA under a named guest address-space epoch | final physical bytes, second-stage permission, COW ownership, working-set residency, or game object lifetime | second-stage root, Windows region contract, process lifetime, and invalidation context |
-| Second-stage translation authority | EPTP or `N_CR3`, EPT/NPT leaf chain, memory type, R/W/X bits, A/D state, EPT violation or NPF payload, invalidation action | a GPA was mapped, denied, redirected, or faulted by the hypervisor-owned translation layer | Windows read legality, private/process ownership, engine semantics, or user-visible advantage | first-stage walk, page-state join, per-core stale-translation proof, and semantic target |
-| Host physical byte authority | host physical mapping, dump offset, VMI physical read, debugger memory read, DMA acquisition path | bytes existed at an acquisition address and time | that the bytes were accessible to Windows, belonged to a live process, or represented a current game object | translation proof, OS-read parity, backing-store state, range coherence, and acquisition clock |
-| Windows process semantic authority | `VirtualQueryEx`, `MEMORY_BASIC_INFORMATION`, `QueryWorkingSetEx`, `PSAPI_WORKING_SET_EX_BLOCK`, `ReadProcessMemory`, VAD or PTE debugger evidence | region class, selected page attributes, working-set state, COW clues, and handle-bound read parity | hidden second-stage ownership, lower-layer mutation, or gameplay meaning | CPU translation chain, acquisition path, module/section owner, semantic decoder, and epoch |
-| Execution-policy authority | page protection, CFG target policy, CET user shadow-stack policy, HVCI/KCFG/KCET source-of-truth fields, second-stage execute permission | whether a code address was permitted, invalid, trapped, or protected by a named execution policy | data visibility, memory acquisition, or gameplay consequence | event payload, module identity, policy epoch, call target or shadow-stack state, and behavior join |
-| Engine semantic authority | object root, allocator generation, class metadata, component graph, replication state, prediction/correction state, replay or spectator surface | a byte sequence can be interpreted as a candidate object, surface, or epoch inside an engine model | server truth, player knowledge, anti-cheat label, or offset stability across private builds | source-backed surface class, server/replay authority, object lifetime proof, and decoder version |
-| Delivery authority | display/capture path, compositor state, overlay plane, HID or Raw Input path, input timing, foreground/session context | information or automation plausibly reached a human, capture stack, or input stream | local acquisition source, hidden-information access, or server-visible effect | local technical chain, replay tick, input/output epoch, and behavior consequence |
-| Platform posture authority | TLFS/VBS/VTL state, TPM or attestation output, App Control/driver policy, Kernel DMA Protection, firmware or device posture | measured boot, policy state, legitimate hypervisor story, device/DMA posture, or entry eligibility | runtime EPT/NPT ownership, process-memory access, game-object access, or cheat absence | runtime contradiction, transition evidence, endpoint telemetry, and source-specific negative control |
-| Tool and harness authority | HyperDbg, LibVMI, KVMi, DRAKVUF, QEMU/KVM, LiveCloudKd, Volatility, MemProcFS, LeechCore, CHIPSEC, lab VMMs | what a named tool/backend observed or mutated under a pinned configuration | production endpoint truth, absence of compromise, or equivalence to another acquisition path | provenance context, mutation budget, endpoint comparator, independent corroboration, and freshness gate |
+| If the evidence stops here | Say this | Do not say this yet |
+|---|---|---|
+| CPU exit or VMCS/VMCB state | a low-level transition or control-state event happened | a game object was read |
+| guest CR3 and page-table walk | a virtual address mapped to a guest physical address | the final physical bytes were honest |
+| EPT/NPT entry or fault | the second-stage view mapped, blocked, redirected, or faulted a GPA | Windows would expose the same bytes |
+| physical or VMI byte read | bytes were acquired through one route | the live process contained a current object |
+| Windows region and read parity | a bounded process-memory observation exists | the object was meaningful to gameplay |
+| engine object plus delivery path | the information could affect player-visible behavior | enforcement certainty without replay or server context |
 
-The practical rule is mechanical: write the conclusion from the weakest surviving bridge. If the chain stops at a second-stage fault, the conclusion is a translation-layer event. If it reaches bytes but not Windows region and read parity, it is a below-OS byte sample. If it reaches Windows parity but not engine lifetime, it is a process-memory candidate. If it reaches engine lifetime but not delivery or server consequence, it is a local semantic hypothesis. Stronger wording needs evidence from every layer it names.
+The practical rule is simple: write the conclusion from the weakest step in the chain. If the chain stops at a second-stage fault, call it a translation-layer event. If it reaches bytes but not Windows parity, call it a below-OS byte sample. If it reaches Windows parity but not engine lifetime, call it a process-memory observation. Stronger wording needs stronger joins.
 
 ### 2. VMX/SVM Control State
 
-Intel VT-x uses VMX root and non-root operation. AMD-V/SVM uses host and guest operation. The exact names differ, but the engineering invariant is similar: the active owner must consume a legal control object, enter guest execution, preserve native exit payloads, and return with state that remains coherent across CPU, OS, nested, and device observers. A statement that stops at "VMX is enabled" or "SVM is enabled" is therefore only a mode candidate, not proof of runtime control-state ownership.
+Intel VT-x uses VMX root and non-root operation. AMD-V/SVM uses host and guest operation. The names differ, but the practical idea is the same: the CPU needs a valid control object, enters guest execution, records why it left, and returns to the guest without breaking the machine's story. So a statement that stops at "VMX is enabled" or "SVM is enabled" is only saying that a mode exists. It does not prove who actually controlled execution at runtime.
 
 | Concept | Intel term | AMD term | Why it matters |
 |---|---|---|---|
@@ -132,13 +145,25 @@ Intel VT-x uses VMX root and non-root operation. AMD-V/SVM uses host and guest o
 | Entry to guest | VM-entry | VMRUN/resume | Returns control to Windows after emulation or policy handling |
 | Per-register/event filtering | MSR bitmaps, I/O bitmaps, exception bitmap | intercept vectors and bitmaps | Keeps overhead manageable by avoiding unnecessary exits |
 
-Control state is where the hypervisor becomes concrete. Handler code only runs when the VMCS or VMCB routes an event out of the guest. Treating VMX/SVM as a single privilege bit misses the real model: a CPU-enforced policy engine for state, translation, event routing, and return-to-guest behavior. The data path is control object -> legal transition -> native payload -> handler mutation -> re-entry result; the common mistake is skipping one of those owners while still talking about process memory, game semantics, or stealth consistency.
+Control state is where the hypervisor becomes real. Handler code only runs when the VMCS or VMCB tells the CPU to send an event out of the guest. Thinking of VMX/SVM as one magic privilege bit hides the real model: the CPU is following a set of rules for state, memory translation, event routing, and returning to Windows.
 
-The section-level invariant is consumed control, not configured control. A VMCS, VMCB, bitmap, intercept vector, or nested-enlightenment structure matters only when the responsible owner consumes it in a legal transition and leaves a replayable payload. The defender observable is the conservation of guest state, host resume state, control policy, exit qualification, and re-entry result across that transition. A useful cross-check is wrong-owner replay: substitute a stale, copied, L1-visible, wrong-core, or never-entered control object and see whether the conclusion falls back to a narrower statement.
+The useful path is:
+
+```text
+control object
+  -> legal guest entry or exit
+  -> native exit payload
+  -> handler changes
+  -> guest resumes coherently
+```
+
+The common mistake is to skip one of those steps and then make a stronger claim about process memory, game state, or stealth.
+
+The key distinction is configured control versus consumed control. A VMCS, VMCB, bitmap, intercept vector, or nested structure matters only when the CPU or nested owner actually used it during a legal transition. A useful cross-check is simple: replace the active control object with a stale copy, a wrong-core copy, or an object that was never entered. If the conclusion still sounds just as strong, it was probably based on a memory object rather than live execution.
 
 #### 2.1 State Groups
 
-A hypervisor cheat must keep several state groups coherent across the same vCPU/core, timebase, translation root, interrupt epoch, and device view. If it only spoofs one surface, the rest of the machine can contradict it because each state group has a different owner and a different failure signature.
+A hypervisor has to keep several parts of the machine consistent at the same time. If it only fakes one surface, another surface can contradict it. That is why the important question is not "did one field look suspicious?" but "did all related state move together?"
 
 | State group | Contents | Failure if wrong |
 |---|---|---|
@@ -154,13 +179,28 @@ A hypervisor cheat must keep several state groups coherent across the same vCPU/
 | Per-vCPU scratch state | temporary mappings, single-step state, pending events, current target process | races across cores and intermittent corruption |
 | Tool and provenance state | decoder version, symbol profile, acquisition epoch, pause/freeze policy, observer route | stale tooling output is promoted into endpoint truth |
 
-These groups are not independent checkboxes. A VM-exit consumes guest state, host resume state, control policy, translation state, and qualification fields as one transition. A credible analysis should therefore name the transition that joins them: which logical processor owned the control object, which VMCS/VMCB epoch was current, which guest instruction or event caused the exit, which translation root was active, which fields were updated by hardware, which fields were only cached by software, and which pending event was injected or suppressed on re-entry.
+These groups are not independent checkboxes. A VM-exit joins guest state, host resume state, control policy, translation state, and exit information into one transition.
 
-The invariant is cross-group conservation. Changing only CPUID while leaving `CR4.OSXSAVE`, XState masks, MSR accessibility, and guest exception behavior unexplained is only a feature story, not a coherent virtual CPU model. Naming an EPT violation while omitting the active EPTP/NPT root, invalidation epoch, guest-linear validity, and re-entry action gives a fault candidate, not a memory-view proof. This is why VMX/SVM analysis should start with state groups before it names a hook, an exit handler, or a cheat capability.
+A readable analysis should answer a few concrete questions:
 
-The attacker leverage is selective conservation. A thin malicious hypervisor wants to conserve only the state groups that the guest or anti-cheat is likely to cross-check, while allowing unobserved groups to drift. The defender observable is therefore not one suspicious field; it is a conservation failure across owners that should have changed together. A TSC story that disagrees with interrupt delivery, a CPUID story that disagrees with XState exception behavior, an EPT story that disagrees with Windows page-state replay, or a PASID story that disagrees with the CPU address-space root is stronger than any isolated row.
+- which logical processor owned the control object?
+- which VMCS or VMCB was current?
+- which guest instruction or event caused the exit?
+- which translation root was active?
+- which fields were updated by hardware?
+- which state was only cached or inferred by software?
+- which pending event was injected, delayed, or suppressed when the guest resumed?
 
-The safe wording rule is simple: a state group names a native owner, not a gameplay conclusion. "The VMCS says X" is still only a VMCS-local statement until the consuming transition, guest-visible effect, and later layer bridges are named.
+The rule is cross-group consistency. For example, changing only CPUID while leaving `CR4.OSXSAVE`, XState masks, MSR access, and exception behavior unexplained is not a full CPU story. It is only a feature story. Naming an EPT violation without the active EPTP/NPT root, invalidation step, guest-linear validity, and resume behavior is not a complete memory-view conclusion. It is only a fault observation.
+
+A thin malicious hypervisor wants to keep only the surfaces that someone is likely to check. The useful defensive signal is not one odd field. It is a mismatch between fields that should agree:
+
+- a TSC story that disagrees with interrupt delivery
+- a CPUID story that disagrees with XState exception behavior
+- an EPT story that disagrees with Windows page-state replay
+- a PASID story that disagrees with the CPU address-space root
+
+The safe wording rule is simple: "the VMCS says X" is still only a VMCS-local statement. It becomes stronger only after the live transition, the guest-visible result, and the later process or game evidence are connected.
 
 #### 2.2 Intel VMCS Layout in Practice
 
@@ -177,7 +217,7 @@ The Intel VMCS is not a single flat "context." It is a field-encoded control obj
 | VM-entry controls | guest IA-32e mode, entry event injection, MSR load behavior | Controls how the CPU resumes the guest |
 | VM-exit information fields | exit reason, exit qualification, guest linear address, guest physical address, instruction length, interruption info | Gives the handler enough detail to emulate or classify the event |
 
-For cheat analysis, several VMCS fields are especially important because each one creates a different intercept, timing, translation, or re-entry owner. A useful analysis row preserves the field family, the controlling capability MSR or allowed-bits source, the vCPU epoch, and the post-transition artifact instead of flattening the tuple into "VMX was enabled."
+For cheat analysis, several VMCS fields are especially important because each one creates a different intercept, timing, translation, or re-entry owner. A useful analysis row preserves the field family, the controlling capability MSR or allowed-bits source, the vCPU epoch, and the evidence after the transition instead of flattening the tuple into "VMX was enabled."
 
 - **Exception bitmap:** Determines which guest exceptions exit. It affects hidden breakpoints, single-step behavior, debug register use, and anti-probe logic.
 - **MSR bitmap:** Allows selective exiting on RDMSR/WRMSR. Broad MSR interception is noisy. Selective interception requires knowing which MSRs Windows and security products legitimately touch.
@@ -206,7 +246,7 @@ Intel's SDM separates the VMX instruction set into management, transition, inval
 
 VMX instructions report success or failure through flags and, for valid current-VMCS cases, the VM-instruction error field. Operationally, a correct implementation needs more than a raw VMX instruction path. It must handle `VMfailInvalid`, `VMfailValid`, and VM-entry failure classes cleanly.
 
-The invariant is instruction-state pairing. Every VMX instruction conclusion needs the instruction, the logical processor, the current VMCS state, the capability basis, the success/failure carrier, and the next lifecycle state. The simple check is to keep the same instruction trace but move it to a different logical processor, clear the current VMCS, change launch state, or replace the capability MSR tuple. If the conclusion still says the same thing, it is treating a VMX mnemonic as proof rather than a consumed architectural transition.
+The invariant is instruction-state pairing. Every VMX instruction conclusion needs the instruction, the logical processor, the current VMCS state, the capability basis, the success/failure carrier, and the next lifecycle state. The simple check is to keep the same instruction trace but move it to a different logical processor, clear the current VMCS, change launch state, or replace the capability MSR tuple. If the conclusion still says the same thing, it is treating a VMX mnemonic as evidence instead of checking the architectural transition that actually happened.
 
 ##### Intel VMCS field detail
 
@@ -215,7 +255,7 @@ The Intel VMCS is field-encoded, not a C structure with a stable public layout. 
 | VMCS field family | Representative fields | What the processor uses it for | Anti-cheat relevance |
 |---|---|---|---|
 | Guest control state | guest CR0/CR3/CR4, DR7, IA32_EFER, PDPTEs where relevant | Defines the guest execution and paging environment loaded on VM entry and updated on VM exit. | Bad values crash Windows or create impossible combinations such as unsupported long-mode or paging states. |
-| Guest descriptor state | guest CS/SS/DS/ES/FS/GS/TR/LDTR selectors, bases, limits, access rights, GDTR/IDTR | Reconstructs segmentation, task, and descriptor-table state. | Segment/access-right mistakes are a common source of subtle VM-entry failures and emulation artifacts. |
+| Guest descriptor state | guest CS/SS/DS/ES/FS/GS/TR/LDTR selectors, bases, limits, access rights, GDTR/IDTR | Reconstructs segmentation, task, and descriptor-table state. | Segment/access-right mistakes are a common source of subtle VM-entry failures and emulation evidence. |
 | Guest event state | guest RIP/RSP/RFLAGS, activity state, interruptibility state, pending debug exceptions, VMCS link pointer | Controls where the guest resumes and whether events can be delivered. | Hidden single-step, NMI-window, interrupt-window, and debug behavior can leak if this state is inconsistent. |
 | Host state | host CR0/CR3/CR4, host RIP/RSP, host selectors, host MSRs such as SYSENTER/EFER/perf/CET where enabled | Defines the machine state the CPU loads during a VM exit. | A malformed host state usually fails loudly. Partial mistakes show up as NMI/interrupt instability. |
 | Pin-based execution controls | external-interrupt exiting, NMI exiting, virtual NMIs, posted interrupts where supported | Handles asynchronous event routing. | Overly broad interrupt/NMI exiting adds latency. Too little routing breaks defensive probes and interrupt semantics. |
@@ -231,7 +271,11 @@ VMCS field analysis should keep the field encoding, width class, access type, de
 
 ##### Intel VM-entry, VM-instruction, and VMX-abort details
 
-VMX transition failure is evidence, not only a bring-up bug. Intel separates instruction failure from VM-entry failure, ordinary VM-exit payload, and catastrophic VMX-abort state. A broad sentence such as "VM entry failed" is too weak unless it names the failure class, the field owner, and the information source. A broad sentence such as "VM-exit failed" is usually worse: there is no routine VM-exit failure class that mirrors VM-entry failure. If a VM-exit cannot complete as a coherent transition, the analysis should describe the actual evidence, such as malformed host-state load risk, missing exit-information payload, VMX-abort indicator, reset/shutdown behavior, or crash context.
+VMX transition failure is evidence, not only a bring-up bug. Intel separates instruction failure from VM-entry failure, ordinary VM-exit payload, and catastrophic VMX-abort state.
+
+A broad sentence such as "VM entry failed" is too weak unless it names the failure class, the field owner, and the information source. A broad sentence such as "VM-exit failed" is usually worse because there is no routine VM-exit failure class that mirrors VM-entry failure.
+
+If a VM-exit cannot complete as a coherent transition, describe the actual evidence: malformed host-state load risk, missing exit-information payload, VMX-abort indicator, reset/shutdown behavior, or crash context.
 
 | Failure surface | Manual-level source | Common broken implementation | Data to retain | Maximum conclusion |
 |---|---|---|---|---|
@@ -242,13 +286,13 @@ VMX transition failure is evidence, not only a bring-up bug. Intel separates ins
 | VM-entry MSR-load failure | VM-entry MSR-load address/count and 16-byte MSR entries; WRMSR-equivalent validity checks; entry failure qualification | stale MSR-load list, unsupported MSR index, reserved bits in MSR value, EFER/PAT/perf/CET/PKRS state inconsistent with active controls | list address/count, failing entry index, MSR/value pair, control bit that requested the load, entry-failure metadata | entry-load failure |
 | EPT/VPID invalidation failure | `INVEPT`, `INVVPID`, EPTP, VPID, invalidation type, EPT/VPID capability bits | remap or split view without matching invalidation, unsupported invalidation type, over-flush hiding stale-state evidence | invalidation instruction, type, operand descriptor, EPTP/VPID, old/new leaf, affected core set, resume epoch | stale or over-flushed translation risk |
 | exit-information classification | exit reason, exit qualification, guest-linear address, guest-physical address, instruction information/length, interruption information, IDT-vectoring information | reducing an event to RIP plus reason, losing GLA-valid and page-walk context, mixing event-delivery exits with final memory access exits | full exit payload, GLA-valid and GPA fields, page-walk versus final-page label, event-delivery state, handler decision | classified VM-exit event |
-| VMX-abort or exit-transition catastrophe | VMCS abort indicator, VMXON/current-VMCS state, host-state load context, reset or crash evidence | treating an unrecoverable transition as an ordinary exit reason, or treating a reset as stealth | VMCS abort indicator, current VMCS identity, logical processor, host-state fields if retained, machine-check or crash artifact, first coherent post-reset epoch | catastrophic lifecycle evidence |
+| VMX-abort or exit-transition catastrophe | VMCS abort indicator, VMXON/current-VMCS state, host-state load context, reset or crash evidence | treating an unrecoverable transition as an ordinary exit reason, or treating a reset as stealth | VMCS abort indicator, current VMCS identity, logical processor, host-state fields if retained, machine-check or crash evidence, first coherent post-reset epoch | catastrophic lifecycle evidence |
 
 The strongest Intel conclusion is only as strong as the last legal transition. If the analysis cannot replay the derivation from capability MSRs to legal control fields, from legal control fields to VM-entry, and from VM-entry to exit payload, the conclusion should stop at lab-local failure or mechanism suspicion.
 
 #### 2.3 AMD VMCB Layout in Practice
 
-AMD SVM uses the VMCB as the consumed contract for `VMRUN`, not merely as a memory-resident struct. The consumed-contract invariant splits the control area from the save-state area and then asks which fields were consumed on entry, which fields were written back on exit, which fields were cached or skipped through clean-bit behavior, and which permission-map or nested-root pages lived outside the VMCB body. Without that epoch binding, a VMCB dump is a configuration candidate, not proof that hardware consumed the state.
+AMD SVM uses the VMCB as the state block that `VMRUN` actually reads and updates, not merely as a struct that happens to exist in memory. A useful trace separates the control area from the save-state area, then asks which fields were used on entry, which fields were written back on exit, which fields may have been cached through clean-bit behavior, and which permission-map or nested-root pages lived outside the VMCB body. Without that `VMRUN` epoch, a VMCB dump is only configuration evidence.
 
 | VMCB area | Examples | Why it matters |
 |---|---|---|
@@ -265,7 +309,16 @@ Important SVM-specific concepts:
 - **Virtual interrupt controls:** Interrupt shadowing, virtual interrupt delivery, and APIC-related behavior are latency-sensitive and easy to perturb.
 - **Clean bits:** On supported processors, clean-bit style mechanisms let the CPU skip reloading unchanged VMCB state. This is a performance feature, but it also means frequent control-state churn has a measurable cost.
 
-The practical invariant is that the VMCB is not one object with one clock. It is a set of contracts with different owners: intercept policy, permission-map physical pages, ASID and TLB-control state, nested root, virtual interrupt state, save-state bytes, clean-bit currentness, and exit-status writeback. The attacker leverage is that a thin SVM layer can touch only a few groups and still observe useful events. The defender observable is cross-group contradiction: an exit stream that does not match the intercept epoch, an NPF tuple that does not match `N_CR3`, an interrupt outcome that does not match virtual interrupt state, or a guest behavior that follows a cached save-state group rather than the VMCB bytes in memory. The sanity check is group isolation: perturb one VMCB group, one clean bit, and one ASID/TLB epoch independently, then reject any sentence that still treats the VMCB as a single timeless state object.
+The practical rule is simple: do not treat the VMCB as one object with one clock. Its control fields, permission-map pages, ASID/TLB state, nested root, virtual-interrupt state, save-state bytes, clean bits, and exit-status fields can all have different currentness.
+
+That matters because a thin SVM layer can touch only a few groups and still observe useful events. The useful defensive clue is contradiction between groups:
+
+- an exit stream that does not match the intercept epoch
+- an NPF tuple that does not match `N_CR3`
+- an interrupt result that does not match virtual-interrupt state
+- guest behavior that follows cached state rather than the VMCB bytes currently visible in memory
+
+The sanity check is to change one group at a time: one VMCB field group, one clean bit, and one ASID/TLB epoch. If the conclusion still treats the VMCB as a single timeless object, the wording is too strong.
 
 ##### AMD SVM instruction groups
 
@@ -283,13 +336,23 @@ AMD exposes a smaller but very explicit SVM instruction set. The VMCB remains th
 
 AMD also defines many instruction intercepts in the VMCB, including `RDTSC`, `RDPMC`, `PAUSE`, `HLT`, `INVLPG`, `INVLPGA`, `VMRUN`, `VMLOAD`, `VMSAVE`, `VMMCALL`, `STGI`, `CLGI`, `SKINIT`, `RDTSCP`, `WBINVD`, `MONITOR/MWAIT`, `XSETBV`, `INVPCID`, `INVLPGB`, and related TLB synchronization operations where supported. This breadth matters because an SVM design can be noisy even without second-stage page faults if it intercepts hot instruction families.
 
-The source vocabulary needs one more split: dedicated SVM instructions are not the same thing as interceptable instruction families. The former move ownership across the host/guest boundary; the latter are policy decisions encoded in VMCB intercept fields. A analysis that calls every intercepted instruction an "SVM instruction" loses the authority boundary.
+The source vocabulary needs one more split: dedicated SVM instructions are not the same thing as interceptable instruction families. The former move ownership across the host/guest boundary; the latter are policy decisions encoded in VMCB intercept fields. An analysis that calls every intercepted instruction an "SVM instruction" loses the authority boundary.
 
-The invariant is role conservation. `VMRUN` is a world-switch authority, `VMLOAD` and `VMSAVE` are state-transfer authorities, `STGI` and `CLGI` are interrupt-gating authorities, `INVLPGA` is an address-translation invalidation authority, and an intercept bit is a policy authority. The attacker leverage is selective: a thin hypervisor wants the smallest policy surface that still gives CR3, timer, page-fault, or translation visibility. The defender observable is not the instruction name alone; it is the mismatch between instruction role, VMCB field churn, exit code, timing distribution, and the state that changed afterward.
+Keep the roles separate. `VMRUN` is a world-switch operation. `VMLOAD` and `VMSAVE` move selected state. `STGI` and `CLGI` gate interrupts. `INVLPGA` invalidates address translations. An intercept bit is policy.
 
-The data path for this section is control metadata, not game bytes: VMCB physical address, host save area, guest save-state area, intercept bits, ASID, invalidation operand, and exit code. The layer boundary stops at SVM control-plane behavior until another section joins it to process memory, game semantics, or delivery evidence.
+A thin hypervisor wants the smallest policy surface that still exposes CR3, timer, page-fault, or translation information. A defender should therefore look for mismatch between the role, the VMCB fields that changed, the exit code, the timing distribution, and the state that changed afterward.
 
-Dominant failure modes are broad hot-instruction interception, stale ASID-tagged translations after incomplete `INVLPGA` or `TLB_CONTROL` use, interrupt-window drift after `CLGI`/`STGI` mistakes, hidden state drift from misordered `VMLOAD`/`VMSAVE`, and measured-launch trust inferred from a bare `SKINIT` mention without a boot-chain and TPM evidence bridge. The sanity check removes one role at a time: allow the hot instruction, keep `VMRUN` but freeze the VMCB intercept field, replace `INVLPGA` with a broader flush, replay with a different ASID, or compare NMI/window timing with and without interrupt gating. If the same anti-cheat conclusion survives all variants, the evidence is not role-specific enough.
+This section is about SVM control metadata, not game bytes. The useful data is the VMCB physical address, host save area, guest save-state area, intercept bits, ASID, invalidation operand, and exit code. It should not be described as process memory or game evidence until another section connects it to those layers.
+
+Common failure modes are easier to read as a list:
+
+- broad interception of hot instructions
+- stale ASID-tagged translations after incomplete `INVLPGA` or `TLB_CONTROL` use
+- interrupt-window drift after `CLGI` or `STGI` mistakes
+- hidden state drift from misordered `VMLOAD` or `VMSAVE`
+- measured-launch trust inferred from `SKINIT` without boot-chain and TPM evidence
+
+The sanity check removes one role at a time. Allow the hot instruction, freeze one intercept field, replace `INVLPGA` with a broader flush, replay with a different ASID, or compare NMI timing with and without interrupt gating. If the same conclusion survives every variant, the evidence is not role-specific enough.
 
 ##### AMD VMCB control-area detail
 
@@ -310,7 +373,7 @@ The AMD APM defines the VMCB as a 4 KB page with a 1024-byte control area follow
 | Pause filter fields | Pause filter threshold/count where supported. | Helps avoid excessive PAUSE-loop exits. Wrong values create either spin-loop overhead or missed signals. |
 | VMCB clean field | Indicates which state groups have not changed and can be cached. | If the hypervisor modifies VMCB state without clearing the matching clean bit, behavior can become undefined or core-dependent. |
 
-The control area should be treated as a transition contract, not as a static field table. A field is meaningful only if the `VMRUN` epoch consumed it, the clean-bit state allowed the CPU or implementation to see the change, and the resulting exit or guest behavior preserved the same owner story.
+The control area should be read as transition-owned state, not as a static field table. A field is meaningful only if the `VMRUN` epoch used it, the clean-bit state allowed the CPU or implementation to see the change, and the resulting exit or guest behavior preserved the same owner story.
 
 The evidence bridge is `VMRUN` consumption plus the resulting native exit or guest behavior. The attacker leverage is selective control-state mutation with stale clean-bit or ASID assumptions. The defender observable is a mismatch between the VMCB field story, the clean-bit story, the exit payload, and the guest-visible result.
 
@@ -327,17 +390,42 @@ The VMCB save-state area contains the guest architectural state that `VMRUN` loa
 | System-call and MSR-adjacent state | STAR/LSTAR/CSTAR/SFMASK, kernel GS base, SYSENTER fields where supported | Wrong state causes subtle syscall-path or WoW64/compatibility failures. |
 | Extended/security state | CET, XCR0, SEV/SEV-ES/SNP-related state where supported | Modern AMD systems may expose more state than older SVM summaries assume. |
 
-The source-contract checkpoint is stricter than "the VMCB saves registers." `VMRUN` uses the system-physical VMCB address supplied through `RAX`, saves only the host subset required for return through the host save area, loads guest state and control from the VMCB, and relies on `VMLOAD`, `VMSAVE`, and software-managed state paths for additional state when needed. AMD's SEV-ES material makes the boundary sharper: legacy AMD-V exposes more register state to hypervisor-managed save paths, while SEV-ES encrypts and integrity-protects the guest save-state area and moves selected emulation disclosure into the guest-controlled #VC/GHCB path. Therefore a save-state conclusion must name the SVM generation and protection mode before it says what the hypervisor can observe or modify.
+The source checkpoint is stricter than "the VMCB saves registers."
 
-The invariant is save-state ownership conservation. A VMCB memory snapshot is not automatically the state the CPU loaded, and a post-exit VMCB field is not automatically the state that existed at the faulting instruction. The authority bridge has to connect VMCB physical identity, `VMRUN` epoch, clean-bit state, load/save path, and a guest-visible comparator. The control owner is split between the VMM-maintained VMCB fields, processor state caching, SEV-ES/SNP protection state where enabled, and any guest-mediated disclosure path. The timing model has at least three windows: pre-`VMRUN` bytes, state actually consumed during entry, and state written back or disclosed after exit.
+`VMRUN` uses the system-physical VMCB address supplied through `RAX`. It saves only the host subset needed for return through the host save area, then loads guest state and control from the VMCB. Additional state may still depend on `VMLOAD`, `VMSAVE`, or software-managed paths.
 
-The attacker leverage is stealth consistency rather than a single magic register: a thin hypervisor must keep segment, CR, EFER, syscall, debug, interruptibility, and extended/security state plausible while minimizing exits and clean-bit churn. The defender observable is cross-owner drift: guest-visible syscall or exception behavior that disagrees with VMCB snapshots, per-core differences after VMCB reuse, clean-bit mismatches after field mutation, #VC/GHCB disclosure that does not match expected hypervisor visibility, or invalid-exit evidence after a supposedly valid state transition.
+SEV-ES makes this boundary sharper. Legacy AMD-V exposes more register state to hypervisor-managed save paths. SEV-ES encrypts and integrity-protects the guest save-state area and moves selected emulation disclosure into the guest-controlled #VC/GHCB path. A save-state conclusion should therefore name the SVM generation and protection mode before it says what the hypervisor can observe or modify.
 
-The AMD-specific risk is more than "wrong intercept." Stale cached state is just as important. The APM explicitly describes VMCB state caching and clean-bit rules. A hypervisor that moves a VMCB between cores, changes a VMCB physical page, or modifies guest state without clearing the correct clean bits can produce stale or processor-dependent behavior. Dominant failure modes are pre/post-exit state collapse, VMLOAD/VMSAVE omission, XRSTOR or XState drift, clean-bit stale groups, host-save-area overinterpretation, SEV-ES save-area visibility overstatement, GHCB disclosure understatement, and treating one core's VMCB observation as system-wide state. The sanity check changes one owner at a time: keep the VMCB bytes fixed but change clean bits, keep clean bits fixed but change the physical VMCB page, replay on another core, compare guest `CPUID`/syscall/exception behavior, remove a `VMLOAD` or `XRSTOR` step in a lab trace, or switch the model between legacy SVM and SEV-ES-style disclosure. If the same sentence still names exact guest state, it is reading too much from the VMCB snapshot.
+The ownership rule is also simple: a VMCB memory snapshot is not automatically the state the CPU loaded. A post-exit VMCB field is not automatically the state that existed at the faulting instruction.
+
+The bridge has to connect VMCB physical identity, `VMRUN` epoch, clean-bit state, load/save path, and a guest-visible comparator. There are at least three time windows:
+
+1. bytes before `VMRUN`
+2. state actually consumed during entry
+3. state written back or disclosed after exit
+
+The cheat-side problem is consistency. A thin hypervisor must keep segment state, control registers, `EFER`, syscall state, debug state, interruptibility, and extended/security state plausible while minimizing exits and clean-bit churn.
+
+The defensive clue is cross-owner drift: guest-visible syscall or exception behavior that disagrees with VMCB snapshots, per-core differences after VMCB reuse, clean-bit mismatches after field mutation, #VC/GHCB disclosure that does not match expected visibility, or invalid exits after a supposedly valid transition.
+
+The AMD-specific risk is more than "wrong intercept." Stale cached state is just as important. A hypervisor that moves a VMCB between cores, changes a VMCB physical page, or modifies guest state without clearing the correct clean bits can produce stale or processor-dependent behavior.
+
+The common failure modes are:
+
+- collapsing pre-exit state, consumed-entry state, and post-exit writeback into one snapshot
+- omitting `VMLOAD` or `VMSAVE` from the state story
+- drifting XState after `XRSTOR` or lazy save paths
+- leaving clean-bit groups stale
+- over-reading the host save area
+- overstating SEV-ES save-area visibility
+- understating GHCB-mediated disclosure
+- treating one core's VMCB observation as system-wide state
+
+The sanity check changes one owner at a time. Keep the VMCB bytes fixed but change clean bits. Keep clean bits fixed but change the physical VMCB page. Replay on another core. Compare guest `CPUID`, syscall, and exception behavior. If the same sentence still names exact guest state, it is reading too much from the VMCB snapshot.
 
 ##### AMD SVM run/exit lifecycle
 
-On AMD, the VMCB is not just a saved-register block. It is the contract loaded by `VMRUN` and updated on `#VMEXIT`; the control area, save-state area, ASID, `N_CR3`, intercept vectors, clean bits, and `TLB_CONTROL` each carry a different currentness question.
+On AMD, the VMCB is not just a saved-register block. It is the state block loaded by `VMRUN` and updated on `#VMEXIT`; the control area, save-state area, ASID, `N_CR3`, intercept vectors, clean bits, and `TLB_CONTROL` each carry a different currentness question.
 
 ```text
 host prepares VMCB control area and save-state area
@@ -386,7 +474,7 @@ SVM has the same broad defensive story as VMX, but the native carriers, cache ru
 
 #### 2.4 VM-Exit Lifecycle
 
-A VM-exit is not free. The CPU leaves guest execution, loads host state, runs the hypervisor handler, possibly emulates an instruction or event, then resumes the guest. The cost is not only cycles; it is also the architectural obligation to preserve event priority, interruption state, debug state, instruction side effects, translation visibility, and clock continuity.
+A VM-exit is not free. The CPU leaves guest execution, loads host state, runs the hypervisor handler, possibly emulates an instruction or event, then resumes the guest. The cost is not only time. The handler also has to preserve event priority, interruption state, debug state, instruction results, memory-translation visibility, and clock continuity.
 
 Conceptual lifecycle:
 
@@ -406,159 +494,197 @@ A high-quality exit model needs four connected views, not one log line. The view
 |---|---|---|---|
 | cause view | CPU architecture and VMCS/VMCB controls | native exit reason, qualification, instruction context, event-vectoring state | a generic "exit happened" row is promoted into a typed event |
 | payload view | hardware-updated exit fields | GLA/GPA validity, access type, error-code or exitinfo bits, instruction length or decode assist | analyst inference is mistaken for native evidence |
-| mutation view | handler policy | register/MSR/page-view/event-injection delta and invalidation scope | the handler changes state without a replayable explanation |
+| handler-change view | handler policy | register/MSR/page-view/event-injection change and invalidation range | the handler changes state without a replayable explanation |
 | resumption view | VM-entry or `VMRUN` contract | legal guest state, pending event handling, next RIP/NRIP, timer/interrupt continuity | the guest resumes with impossible or stale state |
 
-The invariant is transition conservation: the event that left the guest, the handler decision, and the state that re-entered the guest must describe the same vCPU epoch. The attacker leverage is selective observability, because a thin layer can choose a small set of exits that expose timing, CR3, page-fault, MSR, CPUID, or second-stage events. The defender observable is conservation failure: exit counts without native payload, payload without target binding, handler mutation without invalidation evidence, or resumption without legal event state. The sanity check is to keep the guest workload constant while varying one owner, such as intercept bitmap, timer load, vCPU placement, or nested-root epoch, and require the exit explanation to move only with the owner it names.
+The rule is transition conservation. The event that left the guest, the handler decision, and the state that re-entered the guest must describe the same vCPU epoch.
+
+A thin layer benefits from selective observability. It can choose a small set of exits that expose timing, CR3, page-fault, MSR, CPUID, or second-stage events.
+
+The defensive clue is conservation failure:
+
+- exit counts without native payload
+- payload without target binding
+- handler mutation without invalidation evidence
+- resumption without legal event state
+
+The sanity check is to keep the guest workload constant while varying one owner, such as intercept bitmap, timer load, vCPU placement, or nested-root epoch. The exit explanation should move only with the owner it names.
 
 A cheat-oriented design wants exits to be selective because broad interception creates timing, performance, and event-distribution evidence:
 
 1. Identify the game process or relevant address space.
 2. Intercept only events that help memory acquisition, stealth, or input control.
 3. Avoid hot render, input, network, and scheduler paths.
-4. Emulate side effects exactly enough that Windows remains coherent.
+4. Preserve the same CPU-visible results that Windows expects.
 5. Keep per-vCPU and global state synchronized.
 
 ##### 2.4.1 Exit Context as a State Transition
 
 A VM-exit should be treated as a state transition, not as a callback log. The useful context is what the CPU was doing, why the architecture transferred control, what state became architecturally visible to the host, and what the handler changed before re-entry.
 
-The important boundary is causality. An EPT violation, NPF, MSR intercept, CPUID intercept, I/O intercept, or event-delivery exit can all look like "the hypervisor observed the guest." Stronger wording needs the context to show that the observed event belongs to the target address space, the handler preserved architectural side effects, the re-entry state is legal, and the event joins to a later semantic or behavioral consequence.
+The important question is causality. An EPT violation, NPF, MSR intercept, CPUID intercept, I/O intercept, or event-delivery exit can all look like "the hypervisor observed the guest." Stronger wording needs more context: did the event belong to the target address space, did the handler preserve the CPU-visible result, did the guest resume legally, and did the event later connect to memory, game state, or behavior?
 
-| Layer | Native evidence | Analyst question | If missing |
+| Step | Native evidence | Analyst question | If missing |
 |---|---|---|---|
-| source context | vCPU, guest RIP/NRIP, CR3/ASID, CPL, interruptibility, pending vectoring | which execution epoch produced the exit? | `exit_context_unbound` |
-| cause payload | Intel exit reason/qualification or AMD exitcode/exitinfo fields | what exact architectural condition transferred control? | `exit_payload_under_specified` |
-| target binding | GLA/GPA validity, process root, nested root, access type, instruction bytes | did the event belong to the target game or OS object? | `target_context_unjoined` |
-| handler side effect | emulation result, injected event, register/MSR/page-view delta, invalidation scope | what did the handler change before resume? | `handler_effect_unproven` |
-| re-entry legality | VM-entry success/failure, VMRUN resume state, pending events, next RIP/NRIP | did the guest resume in an architecturally legal state? | `reentry_legality_unproven` |
-| external promotion | memory semantic, render/input path, replay/server consequence | did the low-level event become an advantage or artifact? | `semantic_bridge_missing` |
+| source context | vCPU, guest RIP/NRIP, CR3/ASID, CPL, interruptibility, pending vectoring | which execution moment produced the exit? | the exit is missing context |
+| cause payload | Intel exit reason/qualification or AMD exitcode/exitinfo fields | what exact condition transferred control? | the exit type is under-specified |
+| target binding | GLA/GPA validity, process root, nested root, access type, instruction bytes | did the event belong to the target game or OS object? | the target is not joined |
+| handler change | emulation result, injected event, register/MSR/page-view change, invalidation range | what did the handler change before resume? | the handler result is not yet replayed |
+| re-entry legality | VM-entry success/failure, VMRUN resume state, pending events, next RIP/NRIP | did the guest resume legally? | resume legality is unproven |
+| later consequence | memory meaning, render/input path, replay/server consequence | did the low-level event become an advantage or evidence? | the game bridge is missing |
 
 This framing is especially important for late-launch hypervisors. A live system already has pending interrupts, debug state, timer state, lazy FPU/XState ownership, scheduler state, and partially ordered memory events. If the exit context does not preserve those joins, the strongest safe statement is only "a transition occurred under virtualization," not "the hypervisor correctly observed or controlled the target behavior."
 
 ##### 2.4.2 Cost Model and Exit Budget
 
-The exit-budget invariant is not average latency; it is the distribution of work shifted across guest time, host handler time, cache/TLB state, interrupt delivery, and scheduler visibility. The analysis should therefore keep tail latency, cache/TLB disruption, vCPU descheduling, interrupt delay, timer skew, handler lock contention, cross-core rendezvous, and guest-visible jitter together. A low-frequency intercept can still be observable if its epoch aligns with render frames, input sampling, network receive, anti-cheat probes, or scheduler transitions.
+A VM-exit has two costs. The obvious cost is the time spent leaving the guest, running the handler, and returning to the guest. The less obvious cost is the trace it leaves behind: changed timing, TLB/cache disturbance, interrupt delay, or a slightly different event order. A rare exit can still matter if it happens during a render frame, input sample, network receive, anti-cheat probe, or scheduler transition.
 
 | Cost surface | What changes | Why it matters |
 |---|---|---|
 | direct exit latency | guest stops while host handler runs | tail spikes can correlate with gameplay phases |
 | translation disruption | EPT/NPT or guest-paging caches may need invalidation | stale or over-flushed views change timing and correctness |
-| interrupt/event continuity | pending event, vectoring state, interrupt shadow, NMI blocking | double injection or lost event creates rare but strong artifacts |
+| interrupt/event continuity | pending event, vectoring state, interrupt shadow, NMI blocking | double injection or lost event creates rare but strong evidence |
 | SMP coordination | one vCPU's view change must be visible to other cores when treated as global | unsynchronized split views produce cross-core disagreement |
 | probe interaction | anti-cheat, OS, or game timing probes run through the same CPU fabric | spoofed timers cannot explain all latency sources equally |
 
-The invariant is:
-
-A good analysis rejects averages that hide tail behavior. A cheat-oriented hypervisor can survive a low average exit cost and still leak through p99 frame stalls, input-sampling jitter, network receive delay, or timer-distribution distortion. Conversely, an isolated synthetic benchmark that shows high exit cost does not support a gameplay-impact conclusion unless it is joined to the same workload phase and vCPU/core placement. The conclusion has to stay scoped to the exit class, workload phase, observer, and clock domain that were actually measured.
+A useful analysis should not stop at average latency. A cheat-oriented hypervisor can have a low average cost and still leak through rare frame stalls, input jitter, network delay, or timer distortion. The reverse is also true: a synthetic benchmark can show expensive exits without proving gameplay impact. The exit has to be tied to the same workload phase, core placement, and observer that the conclusion talks about.
 
 #### 2.5 Intercept Cost Model
 
-Interception cost is not only "number of exits." Each exit class mutates a different contract: control-flow ordering, timer monotonicity, interrupt latency, page-walk currentness, MSR identity, or exception delivery. A low exit count can still be loud if it touches a high-sensitivity clock or hot page, while a frequent exit can be benign if it is expected for a legitimate nested or VBS-owned path.
+Interception cost is not only "number of exits." Each exit class touches a different part of the machine: control-flow order, timer behavior, interrupt latency, page-table freshness, MSR identity, or exception delivery. A low exit count can still be loud if it touches a sensitive clock or hot page. A frequent exit can be benign if it belongs to a legitimate Hyper-V, VBS, or nested-virtualization path.
 
-The first expert-grade split is **entry cost versus side-effect debt**. Entry cost is the direct transition work: guest pipeline disruption, microarchitectural serialization, host handler execution, and re-entry. Side-effect debt is the evidence that must remain coherent afterward: the emulated instruction result, flags, exception state, interruptibility, TLB/currentness, timebase, and the first independent guest observation after resume. A trace that captures only "exit count" measures the loudest part poorly and misses the part that most often exposes stealth failure.
-
-Use this vector for each intercept family:
+For each intercept family, separate the immediate cost from the follow-up obligations:
 
 ```text
-intercept_cost_vector =
-  direct_transition_cost
-  + handler_emulation_debt
-  + translation_invalidation_debt
-  + timer_and_clock_debt
-  + interrupt_delivery_debt
+intercept_cost =
+  time_spent_in_exit_handler
+  + emulation_correctness
+  + translation_invalidation_work
+  + timer_and_clock_consistency
+  + interrupt_delivery_consistency
   + scheduler_tail_latency
-  + observer_cardinality
-  + reentry_validation_debt
+  + number_of_observers_that_can_notice
+  + reentry_correctness
 ```
 
-The terms are not interchangeable. `direct_transition_cost` can be small while `timer_and_clock_debt` is large. `translation_invalidation_debt` can dominate an otherwise rare EPT/NPT fault. `observer_cardinality` grows when the same event is visible to guest code, VMCS/VMCB payload, Hyper-V/TLFS state, ETW or ISR/DPC timing, device DMA paths, GPU timelines, and server replay. A low-cost statement must therefore say which terms were measured, which terms were intentionally out of scope, and which independent observer would disprove the conclusion.
+These terms are not interchangeable. The handler can be fast while the timer story is still wrong. A rare EPT/NPT fault can still be expensive if it forces broad invalidation. The same event may also be visible to guest code, VMCS/VMCB payload, Hyper-V/TLFS state, ETW timing, device paths, GPU timelines, or server replay. A low-cost statement should therefore say what was measured and which observers were not covered.
 
 | Intercept class | Common trigger shape | Primary cost axis | State that must be retained | Common overstatement |
 |---|---|---|---|---|
 | CPUID | feature discovery, anti-VM probe, library initialization | identity coherence | leaf/subleaf, vendor path, hypervisor-present story, TLFS leaves if exposed, per-core consistency | treating one clean leaf as a coherent CPU story |
-| RDTSC/RDTSCP | probes, busy loops, frame timing, QPC-related calibration | clock and scheduler coherence | TSC offset/ratio if used, reference-time relation, core migration, power state, wall-clock or server tick comparator | treating a local delta threshold as proof of hostile virtualization |
-| CR3/CR access | context switches, address-space root changes, paging-mode probes | event volume and process-root currentness | old/new CR value, PCID or ASID context, thread/vCPU epoch, CR3-target policy, later address-space join | treating a CR3 sample as a game-process memory proof |
-| MSR access | syscall path, APIC, TSC, EFER, PAT, debug/perf, synthetic MSRs | emulation correctness | MSR number, read/write, value, dependency controls, family behavior, failure path | treating a spoofed value as proof that dependent behavior is coherent |
-| Debug and exception events | #DB, #BP, #PF, #NM, #VE, single-step, breakpoint-style probes | event ordering | vector, error code, pending debug state, IDT-vectoring or event-injection state, next guest event | treating a delivered value as proof that exception history was legal |
+| RDTSC/RDTSCP | probes, busy loops, frame timing, QPC-related calibration | clock and scheduler coherence | TSC offset/ratio if used, reference-time relation, core migration, power state, wall-clock or server tick comparator | treating a local delta threshold as evidence of hostile virtualization |
+| CR3/CR access | context switches, address-space root changes, paging-mode probes | event volume and process-root currentness | old/new CR value, PCID or ASID context, thread/vCPU epoch, CR3-target policy, later address-space join | treating a CR3 sample as game-process memory evidence |
+| MSR access | syscall path, APIC, TSC, EFER, PAT, debug/perf, synthetic MSRs | emulation correctness | MSR number, read/write, value, dependency controls, family behavior, failure path | treating a spoofed value as evidence that dependent behavior is coherent |
+| Debug and exception events | #DB, #BP, #PF, #NM, #VE, single-step, breakpoint-style probes | event ordering | vector, error code, pending debug state, IDT-vectoring or event-injection state, next guest event | treating a delivered value as evidence that exception history was legal |
 | EPT/NPT violation | watched page, execute trap, write suppression, view switch | translation currentness | access type, GLA/GPA validity, EPTP or `N_CR3`, VPID/ASID, invalidation action, re-arm path | treating a second-stage fault as process/object authority |
 | Interrupt/APIC/SynIC events | timer, IPI, EOI, posted interrupt, synthetic timer | latency and delivery ordering | APIC/AVIC/APICv/SynIC owner, pending/service state, vector, EOI path, timer source, ISR/DPC witness | treating interrupt delay as a cheat verdict without platform-owner closure |
 | I/O port and MMIO exits | device probe, legacy port, mapped register, doorbell-like path | device ordering | port or GPA, device owner, posted write behavior, memory type, interrupt/fence relation | treating device-side ordering as CPU process-memory evidence |
 
-The second split is **semantic value versus intercept temperature**. A hot intercept is not automatically useful, and a useful intercept is not automatically hot. For example, all-CR3 exiting can produce a large volume of exits but still fail to identify the correct process if the analysis loses thread, PCID, and map-transition context. Conversely, a rare MSR or CPUID intercept can be highly visible if the emulation creates a contradictory Hyper-V, VBS, CET, XState, or timer story. The useful question is not "how many exits occurred?" It is "which layer did this exit help, and which layer did it disturb?"
+The second split is **semantic value versus intercept temperature**. A hot intercept is not automatically useful, and a useful intercept is not automatically hot.
 
-| Workload phase | Intercept-pressure risk | Why it matters | Safer scope boundary before joins |
+For example, all-CR3 exiting can produce many exits and still fail to identify the correct process if the analysis loses thread, PCID, and map-transition context. Conversely, a rare MSR or CPUID intercept can be highly visible if the emulation creates a contradictory Hyper-V, VBS, CET, XState, or timer story.
+
+The useful question is not "how many exits occurred?" It is "which layer did this exit help, and which layer did it disturb?"
+
+| Workload phase | Intercept-pressure risk | Why it matters | Careful wording before more evidence |
 |---|---|---|---|
-| boot or hypervisor bring-up | VMX/SVM lifecycle, capability, MSR, interrupt setup | many legitimate platform transitions also happen here | platform transition candidate |
-| launcher and anti-cheat initialization | CPUID/MSR/timer probes, driver and VBS checks | benign security software can create the same families | platform-coherence candidate |
-| map load or level transition | CR3, paging, allocation, file and memory pressure | object roots and address spaces churn quickly | address-space churn candidate |
-| active match frame loop | hot pages, timers, input, GPU and interrupt pressure | small added latency can become phase-coupled | workload-correlated pressure candidate |
-| spectate, replay, or capture | presentation and behavior observers dominate | local intercept evidence may be absent or stale | delivery or behavior candidate |
-| explicit probe window | timing, debug, exception, and CPUID probes | the probe itself changes the workload | probe-conditioned artifact |
+| boot or hypervisor bring-up | VMX/SVM lifecycle, capability, MSR, interrupt setup | many legitimate platform transitions also happen here | possible platform transition |
+| launcher and anti-cheat initialization | CPUID/MSR/timer probes, driver and VBS checks | benign security software can create the same families | possible platform-coherence issue |
+| map load or level transition | CR3, paging, allocation, file and memory pressure | object roots and address spaces churn quickly | possible address-space churn |
+| active match frame loop | hot pages, timers, input, GPU and interrupt pressure | small added latency can become phase-coupled | workload-correlated pressure |
+| spectate, replay, or capture | presentation and behavior observers dominate | local intercept evidence may be absent or stale | possible delivery or behavior evidence |
+| explicit probe window | timing, debug, exception, and CPUID probes | the probe itself changes the workload | probe-conditioned signal |
 
-This table is also the false-positive guard. A Windows endpoint can legitimately expose Hyper-V, VBS, HVCI, WSL2, debugger, nested virtualization, GPU virtualization, and synthetic interrupt/timer behavior. A high-quality intercept-cost paragraph must preserve the platform owner before it names a hostile owner. The correct narrowing for an unexplained signal is often `platform_owner_unresolved`, not "cheat hypervisor."
+This table is also a false-positive guard. A Windows endpoint can legitimately expose Hyper-V, VBS, HVCI, WSL2, debugger, nested virtualization, GPU virtualization, and synthetic interrupt or timer behavior. A good intercept-cost paragraph should identify the legitimate platform owner before it names a hostile one. For an unexplained signal, the honest wording is often "platform owner unresolved," not "cheat hypervisor."
 
 The defensible cost model is phase-coupled and replayable:
 
-The sanity check has three controls. First, keep the same workload and remove one intercept family at a time in a benign lab VMM or trace harness; only conclusions owned by that family should move. Second, keep the intercept family but change the workload phase; a process-memory or game-object conclusion should not survive if the only stable evidence is phase-correlated pressure. Third, keep the local trace but add an independent observer, such as Hyper-V/TLFS state where present, ETW timing, a replay/server tick, a device path, or a second core. If the conclusion changes when a stronger observer is added, the original sentence was an intercept-pressure candidate, not a mechanism proof.
+Use three controls for the sanity check:
 
-For hypervisor-based cheat analysis, the operationally successful design is usually narrow and lazy because each extra intercept expands the observable state and cross-check surface. That is not implementation advice; it is a technical boundary. A low-observable helper still has to account for every intercepted instruction, fault, timer, interrupt, invalidation, and re-entry obligation it selected. Until those debts are paid, the strongest safe wording is that the trace shows bounded intercept pressure under a named workload phase.
+1. Keep the same workload and remove one intercept family at a time in a benign lab VMM or trace harness. Only conclusions owned by that family should move.
+2. Keep the intercept family but change the workload phase. A process-memory or game-object conclusion should not survive if the only stable evidence is phase-correlated pressure.
+3. Keep the local trace but add an independent observer, such as Hyper-V/TLFS state where present, ETW timing, a replay/server tick, a device path, or a second core.
 
-#### 2.6 VM-Entry and VM-Exit as a Correctness Contract
+If the conclusion changes when a stronger observer is added, the original sentence was only a phase-correlated signal, not a complete mechanism explanation.
 
-VM-entry and VM-exit are often described as transitions, but for analysis they are better treated as a contract. The processor does not just jump to a handler. It validates control fields, loads or saves selected architectural state, saves exit information, applies event-blocking rules, and then expects the VMM to return with a coherent next guest state.
+For hypervisor-based cheat analysis, the important lesson is that extra intercepts create extra evidence. Each intercepted instruction, fault, timer, interrupt, invalidation, and re-entry path has to be explained. Until those requirements are satisfied, the safest wording is only that the trace shows limited intercept activity during a named workload phase.
 
-| Contract stage | Intel VMX framing | AMD SVM framing | Analysis consequence |
+#### 2.6 VM-Entry and VM-Exit as a Correctness Check
+
+VM-entry and VM-exit are often described as transitions, but the useful reading is stricter. The processor does not just jump to a handler. It validates control fields, loads or saves selected architectural state, saves exit information, applies event-blocking rules, and then expects the VMM to return with a coherent next guest state.
+
+| Transition stage | Intel VMX framing | AMD SVM framing | Analysis consequence |
 |---|---|---|---|
 | capability discovery | CPUID, VMX capability MSRs, allowed-0/allowed-1 control masks, EPT/VPID capability MSR | CPUID SVM/NPT feature bits, VMCB capability details, ASID and nested paging support | hardcoded control fields are brittle; capability state is part of the evidence |
 | launch preconditions | CR0/CR4 fixed bits, IA32_FEATURE_CONTROL, VMXON region, current VMCS, VM-entry checks | EFER.SVME, VMCB physical address in `RAX`, valid control/save-state fields | failures here are not stealth. They indicate broken ownership or incompatible platform state |
 | guest state load | VM-entry loads guest CRs, RIP/RSP/RFLAGS, segments, MSR-selected state, event injection state | `VMRUN` loads VMCB save-state and control policy, then executes guest mode | a believable VMM must preserve illegal-state checks and mode-specific corner cases |
 | exit dispatch | exit reason, qualification, interruption info, instruction length, GPA/GLA where applicable | `EXITCODE`, `EXITINFO1`, `EXITINFO2`, `EXITINTINFO`, updated save-state area | a normalized trace must preserve vendor-native fields before abstracting them |
-| emulation decision | handler may emulate, reflect, deny, adjust controls, or modify memory mappings | handler updates VMCB state, TLB control, ASID/NPT state, event injection | the difficult part is side effects: flags, pending events, TLB state, time, and interrupts |
+| emulation decision | handler may emulate, reflect, deny, adjust controls, or modify memory mappings | handler updates VMCB state, TLB control, ASID/NPT state, event injection | the difficult part is preserving flags, pending events, TLB state, time, and interrupts |
 | re-entry | `VMLAUNCH` or `VMRESUME` re-enters with VM-entry checks and optional injected event | next `VMRUN` re-enters with VMCB state and clean-bit behavior | a bad handler often fails one exit later, not at the point where the mistake was made |
 
 At this level, this means a VM-exit log should not be reduced to "exit reason + RIP." The transition context needs the active vCPU, guest mode, CR3/PCID or ASID, interruptibility, pending event state, exit qualification, GLA/GPA validity, active EPTP or `N_CR3`, and the re-entry action to stay together. Otherwise the log can prove only that an exit row existed, not that the handler preserved a legal transition.
 
-The invariant is transition-state conservation. Every exit must leave enough evidence to replay what hardware saved, what the handler changed, what event was pending, and why the next entry was legal. The attacker leverage is selective incompleteness: retaining the convenient exit reason while dropping the state that would expose an illegal reinjection, stale control cache, wrong CR3/ASID, or impossible interruptibility transition. The defender observable is a transition trace that either replays or names the missing owner. The sanity check is one-exit-later replay: start from the saved state, apply only the captured handler mutations, run the documented entry checks, and verify that the next exit or guest instruction is possible under the described state.
+The rule is transition-state conservation. Every exit must leave enough evidence to replay four things:
+
+1. what hardware saved
+2. what the handler changed
+3. what event was pending
+4. why the next entry was legal
+
+The common failure is selective incompleteness: keeping the convenient exit reason while dropping the state that would expose illegal reinjection, stale control cache, wrong CR3/ASID, or impossible interruptibility.
+
+The sanity check is one-exit-later replay. Start from the saved state, apply only the captured handler mutations, run the documented entry checks, and verify that the next exit or guest instruction is possible under the described state.
 
 When a VM-exit is used to explain a stable VMM, hidden hook, memory view, or game effect, both halves of the transition have to stay connected: the exit had to be legal to take, and the next entry had to be legal to resume.
 
-Transition contract failure classes:
+Common ways transition evidence gets overstated:
 
-| Failure class | Missing bridge | Narrowing |
+| Failure class | Missing evidence | Safer wording |
 |---|---|---|
-| exit without route owner | exit reason exists, but the control bit or nested owner that routed it is unknown | `exit_payload_only` |
-| handler without side-effect replay | emulation result is logged, but flags, pending events, time, TLB, or MSR/CR effects are absent | `handler_effect_unclosed` |
-| entry legality unpaid | resume was attempted, but entry checks, host state, guest state, or MSR-load legality are not replayed | `resume_attempt_only` |
-| clean-state ambiguity | VMCS/VMCB cached or clean fields may not match memory image | `control_currentness_unproven` |
-| nested owner ambiguity | L1-visible event, L0 shadow event, and TLFS/enlightened event are collapsed | `nested_transition_owner_uncertain` |
-| witness gap | no first post-entry instruction, next exit, or independent observer exists | `transition_not_closed` |
+| exit without route owner | exit reason exists, but the control bit or nested owner that routed it is unknown | exit payload only |
+| handler result not replayed | emulation result is logged, but flags, pending events, time, TLB, or MSR/CR effects are absent | handler result incomplete |
+| entry legality missing | resume was attempted, but entry checks, host state, guest state, or MSR-load legality are not replayed | resume attempt only |
+| clean-state ambiguity | VMCS/VMCB cached or clean fields may not match memory image | currentness unproven |
+| nested owner ambiguity | L1-visible event, L0 shadow event, and TLFS/enlightened event are collapsed | nested owner uncertain |
+| witness gap | no first post-entry instruction, next exit, or independent observer exists | transition not closed |
 
-The sanity check is contract half-removal. Keep the same exit payload but remove handler side effects; keep handler effects but remove entry legality; keep entry legality but remove the first witness; keep the witness but change nested owner. A correct sentence narrows from mechanism wording to the last closed contract half. If it still describes a working view-shaping mechanism after entry legality or first witness is missing, it is reading too much from an exit row.
+The sanity check is to remove one piece of evidence at a time. Keep the same exit payload but remove the handler result. Keep the handler result but remove entry legality. Keep entry legality but remove the first witness after resume. Keep the witness but change the nested owner. A correct sentence should weaken exactly where the missing evidence appears.
 
 #### 2.7 Event Priority, Injection, and Interruptibility
 
 A hypervisor that intercepts events is responsible for preserving the ordering rules that bare metal would have enforced. This is where many technically impressive but shallow VMMs become distinguishable: the cross-check is an impossible next event, duplicated exception, lost interrupt shadow, stale pending-debug state, or injected event that cannot be derived from the captured exit payload.
 
-Event delivery has three states that must not be collapsed. First, there is the event that caused the exit or was being delivered when the exit occurred. Second, there is the handler's decision: emulate, suppress, retry, reflect, inject another event, or resume without injection. Third, there is the entry-time event state consumed by the next guest run. Intel VMX exposes this separation through VM-exit interruption information, IDT-vectoring or original-event fields, VM-entry interruption-information fields, instruction-length fields, interruptibility state, and pending-debug state. AMD SVM exposes the same analysis class through `EXITINTINFO`, `EVENTINJ`, `nRIP`, decode-assist state, GIF or virtual-interrupt state, interrupt shadow, and VMCB save-state fields. The field names are not interchangeable, but the invariant is shared: the next guest instruction or event must be possible under the event history that the trace describes.
+Event delivery has three states that must not be collapsed:
+
+1. the event that caused the exit, or the event that was already being delivered
+2. the handler decision: emulate, suppress, retry, reflect, inject, or resume
+3. the entry-time event state consumed by the next guest run
+
+Intel VMX exposes this through interruption-information fields, IDT-vectoring fields, VM-entry injection fields, instruction length, interruptibility state, and pending-debug state. AMD SVM exposes the same analysis class through `EXITINTINFO`, `EVENTINJ`, `nRIP`, decode-assist state, GIF or virtual-interrupt state, interrupt shadow, and VMCB save-state fields.
+
+The field names differ. The rule is the same: the next guest instruction or event must be possible under the event history that the trace describes.
 
 ```text
 event_delivery_closure =
   pre_exit_guest_state
   -> architectural_priority_decision
   -> native_exit_or_interrupted_event_state
-  -> handler_decision_and_side_effects
+  -> handler_decision_and_state_changes
   -> pending_event_or_injection_state
   -> guest_interruptibility_gate
   -> re_entry_result
   -> first_independent_guest_observation
 ```
 
-The subtle part is that interruptibility is not commentary. It is a delivery gate. Blocking by `STI`, `MOV SS`, NMI state, SMI or similar modes, debug pending state, and virtual interrupt delivery determines whether an event can legally arrive now, whether it must be delayed, whether the current instruction should be retried, and whether the interrupted event must be completed before a new one is injected. A handler that returns clean memory bytes but corrupts event continuity can still be visible through rare nested faults, debugger behavior, NMI-window behavior, timer jitter, DPC timing, or a first observation after resume that could not follow from bare metal.
+Interruptibility is not commentary. It is a delivery gate.
+
+States such as `STI` blocking, `MOV SS` blocking, NMI blocking, SMI-like modes, pending debug state, and virtual interrupt delivery decide whether an event can legally arrive now or must be delayed.
+
+A handler can return clean memory bytes and still leak through event history. The visible symptoms may be rare nested faults, debugger behavior, NMI-window behavior, timer jitter, DPC timing, or a first observation after resume that could not follow from bare metal.
 
 | Event surface | Underlying rule | What can go wrong |
 |---|---|---|
-| instruction emulation | faults, traps, and instruction side effects have architectural priority | the handler advances RIP when the real CPU would have faulted first, or injects the wrong exception type |
+| instruction emulation | faults, traps, and instruction results have architectural priority | the handler advances RIP when the real CPU would have faulted first, or injects the wrong exception type |
 | IDT-vectoring state | exits can occur while an event is being delivered | a nested event is lost, duplicated, or reinjected with the wrong error-code validity |
 | interrupt shadow | `STI`, `MOV SS`, and related states can delay interrupt delivery | interrupt-window behavior differs from bare metal under timing probes |
 | NMI blocking | NMI delivery has special blocking and unblock rules | NMI-window exits or reinjection mistakes create rare but strong evidence |
@@ -566,7 +692,14 @@ The subtle part is that interruptibility is not commentary. It is a delivery gat
 | APIC and posted interrupts | delivery mode, EOI, TPR, and pending vectors are ordered relative to guest execution | latency-sensitive paths such as input, DPCs, and frame pacing drift |
 | event injection controls | entry-time event injection must match vector type, error-code validity, and guest state | returning to the guest with a plausible value but impossible event history still leaks |
 
-The boundary rule is strict. An exception-bitmap hit without vectoring and reinjection state is only an `exception_intercept_candidate`. An NMI-window event without blocking and unblock evidence is only an `nmi_window_candidate`. A single-step or MTF trace without debug-state continuity is only a `single_step_artifact`. A timer or DPC anomaly without event-history closure is only a `latency_correlation`. The sanity check is to replay the same event under a benign VMM or bare-metal control, vary interruptibility state, trigger a nested fault or debug edge, and compare the first independent observation after resume. This is a foundational point, not a variant detail. Hypervisor stealth is less about hiding one object and more about preserving the machine's event history.
+Use narrow wording when the event history is incomplete:
+
+- exception-bitmap hit without vectoring and reinjection state: possible exception intercept
+- NMI-window event without blocking and unblock evidence: possible NMI-window evidence
+- single-step or MTF trace without debug-state continuity: possible single-step evidence
+- timer or DPC anomaly without event-history closure: latency correlation only
+
+The sanity check is to replay the same event under a benign VMM or bare-metal control, vary interruptibility state, trigger a nested fault or debug edge, and compare the first independent observation after resume. Hypervisor stealth is less about hiding one object and more about preserving the machine's event history.
 
 #### 2.8 Capability Negotiation and Control-Field Validity
 
@@ -579,33 +712,58 @@ An expert VMM does not "turn on virtualization" with a fixed constant block. It 
 | Intel extended virtualization capability | `IA32_VMX_EPT_VPID_CAP`, secondary/tertiary execution controls, EPTP-switching capability, #VE, PML, mode-based execute, sub-page permission, guest-paging verification | the actual EPT/VPID and exit-suppression feature set available to this logical processor | treating "Intel EPT" as one uniform feature and misclassifying newer violation bits or unsupported permission modes |
 | Intel VMCS lifecycle | VMXON region revision ID, VMCS revision ID, current-VMCS pointer, `VMPTRLD`, `VMCLEAR`, `VMLAUNCH`, `VMRESUME` | per-logical-processor ownership, launch state, and whether the VMCS is current, active, launched, or clear | cross-core VMCS reuse, stale launch state, or a handler that calls `VMRESUME` on a VMCS that never launched |
 | AMD SVM feature discovery | `CPUID Fn8000_000A`, `EFER.SVME`, VMCB intercept fields, nested-paging support, `NRIPS`, decode assists, `VmcbClean`, `FlushByAsid`, `TscRateMsr` | which SVM accelerations are architectural on this CPU and which fields can be trusted on exit | translating an AMD trace into Intel labels and silently dropping SVM-only constraints |
-| AMD VMCB caching contract | VMCB clean bits, `TLB_CONTROL`, `ASID`, `N_CR3`, MSRPM/IOPM physical bases | which VMCB groups hardware may cache and which changes require clean-bit clearing or TLB action | modifying a VMCB field while leaving its clean bit set, producing core-dependent or run-dependent behavior |
+| AMD VMCB caching behavior | VMCB clean bits, `TLB_CONTROL`, `ASID`, `N_CR3`, MSRPM/IOPM physical bases | which VMCB groups hardware may cache and which changes require clean-bit clearing or TLB action | modifying a VMCB field while leaving its clean bit set, producing core-dependent or run-dependent behavior |
 | AMD invalidation model | `INVLPGA`, `INVLPGB`, `TLBSYNC`, ASID recycling, `FlushByAsid` behavior | whether stale guest or nested translations survive a view change | either stale memory views after a split-view change or over-flushing that creates timing evidence |
-| Hyper-V/VSM platform contract | TLFS synthetic MSRs, VTL state, VSM partition/VP status, MBEC, VTL memory protections | whether a system already has a legitimate hypervisor and higher-VTL memory policy | a hidden VMM creates a second, incoherent virtualization story instead of fitting the platform owner |
+| Hyper-V/VSM platform story | TLFS synthetic MSRs, VTL state, VSM partition/VP status, MBEC, VTL memory protections | whether a system already has a legitimate hypervisor and higher-VTL memory policy | a hidden VMM creates a second, incoherent virtualization story instead of fitting the platform owner |
 
 Preserve the raw feature leaves, capability MSRs, computed control values, VM-entry error fields, VM-exit reason, exit qualification, per-core VMCS or VMCB identity, and the invalidation action that made the next run legal. The invariant is simple: if a control bit is set, the trace should explain which capability made it legal and which guest-visible behavior required it.
 
-Failure classes are stable across vendors even though the field names differ. A hardcoded VMCS control word without the capability MSR is `control_word_unlegalized`. An AMD VMCB update without a clean-bit and ASID/TLB story is `cached_control_candidate`. A nested-enlightenment field without L0/L1/L2 owner identity is `nested_owner_unbound`. A feature bit that appears in CPUID but is not consumed by a successful transition is only `capability_advertised`. The sanity check is control transposition: replay the same guest mode on a nearby CPU or nested owner with one capability absent, and require the conclusion to narrow from "control active" to "control requested" or "capability advertised" rather than silently preserving the stronger wording.
+The same failure pattern shows up on both vendors even when the field names differ:
+
+- a VMCS control word is shown without the capability MSR that made it legal
+- a VMCB field is updated without explaining clean bits, ASID, and TLB currentness
+- a nested or enlightened field is shown without naming the L0/L1/L2 owner
+- a CPUID feature bit is advertised but never tied to a successful transition
+
+The sanity check is capability subtraction. Replay the same guest mode on a nearby CPU or nested owner with one capability absent. The conclusion should narrow from "control active" to "control requested" or "capability advertised" instead of silently preserving stronger wording.
 
 #### 2.9 VMX/SVM Transition-State Closure
 
-Field names become useful only when they are tied to a transition. A VMCS dump, a VMCB dump, or a nested-enlightenment structure can show configured policy, but it does not prove that the processor consumed that policy on the next guest run. The closure question is narrower: did the control object become current, were its fields legal for that CPU and nested owner, did entry consume the expected state, did exit produce a native payload, and did the handler make the next run coherent?
+Field names become useful only when they are tied to a transition. A VMCS dump, a VMCB dump, or a nested structure can show configured policy, but it does not prove that the processor used that policy on the next guest run.
+
+The practical question is narrower: did the control object become current, were its fields legal for that CPU and nested owner, did entry use the expected state, did exit produce native evidence, and did the handler make the next run coherent?
 
 This is the bridge from control-state language into process-memory, timing, interrupt, endpoint-equivalence, or behavior language:
 
-| Transition closure field | Intel VMX evidence | AMD SVM evidence | Nested Hyper-V evidence | Broken implementation it catches | Maximum wording before closure |
+| Transition evidence | Intel VMX evidence | AMD SVM evidence | Nested Hyper-V evidence | Broken implementation it catches | Careful wording before evidence is complete |
 |---|---|---|---|---|---|
-| control-object identity | VMXON region revision, VMCS revision, current-VMCS pointer, `VMPTRLD`, `VMCLEAR`, launch state, logical processor | `VMRUN` `RAX` system-physical VMCB address, VMCB physical-page identity, host-save area relation | enlightened VMCS GPA, VP assist page active eVMCS field, enlightened VMCB reserved area, `VmId`, `VpId` | treating a copied control page as the active control object, cross-core reuse, stale launch state | control-object candidate |
-| capability legalizer | `IA32_FEATURE_CONTROL`, fixed `CR0`/`CR4` masks, `IA32_VMX_*_CTLS`, `IA32_VMX_EPT_VPID_CAP`, secondary/tertiary controls | `CPUID Fn8000_000A`, `EFER.SVME`, SVM feature bits, `VmcbClean`, `FlushByAsid`, `NRIPS`, decode-assist support | TLFS CPUID leaves `0x40000006`, `0x40000009`, `0x4000000A`, eVMCS version, direct virtual flush and enlightened TLB bits | hardcoded control words, Intel-only feature assumptions, unsupported nested feature exposure | legal-control candidate |
-| entry input state | guest/host CRs, RIP/RSP/RFLAGS, segment/access-right fields, VM-entry controls, VM-entry MSR-load list, entry interruption-info field | VMCB control area, save-state area, `EVENTINJ`, guest `EFER`, `RIP/RSP/RFLAGS`, segment state | eVMCS/eVMCB fields plus clean-field mask that decides whether L0 reloads memory | entry consumes stale or impossible guest/host state; injected event is incompatible with guest state | entry-state candidate |
-| native transition result | `CF`/`ZF`, `VMfailInvalid`, `VMfailValid`, VM-instruction error field, VM-entry failure class, VM-exit reason, exit qualification, IDT-vectoring and interruption fields | `EXITCODE`, `EXITINFO1`, `EXITINFO2`, `EXITINTINFO`, `nRIP`, decode-assist fields where valid, updated save-state | synthetic exit reason, nested VM-exit delivery, direct-flush synthetic exit when partition assist state requires it | collapsing instruction failure, entry failure, synthetic exit, and ordinary VM-exit into one "exit" label | native-transition candidate |
-| coherence and currentness action | `INVEPT`, `INVVPID`, EPTP, VPID, MTF restore edge, interruptibility update, old/new VMCS fields | `TLB_CONTROL`, ASID, `N_CR3`, `INVLPGA`, `INVLPGB`, `TLBSYNC`, VMCB clean-bit clear, old/new VMCB fields | eVMCS `CleanFields`, enlightened VMCB clean bit 31, direct virtual flush hypercall fields, partition assist page | table or field mutation never reaches executing hardware; stale virtual TLB survives nested context | coherent-transition candidate |
-| external bridge | CR3/PCID or ASID epoch, Windows region/page/read contract, ETW or ISR/DPC witness, engine tick/frame, endpoint comparator | same, plus AMD-native ASID/`N_CR3` and NPF payload retention | nested L0/L1/L2 owner, guest-visible TLFS feature state, hosted endpoint comparator | later bytes, interrupts, or behavior are used to repair a missing transition proof | external-bridge candidate |
+| control-object identity | VMXON region revision, VMCS revision, current-VMCS pointer, `VMPTRLD`, `VMCLEAR`, launch state, logical processor | `VMRUN` `RAX` system-physical VMCB address, VMCB physical-page identity, host-save area relation | enlightened VMCS GPA, VP assist page active eVMCS field, enlightened VMCB reserved area, `VmId`, `VpId` | treating a copied control page as the active control object, cross-core reuse, stale launch state | possible control object |
+| capability legalizer | `IA32_FEATURE_CONTROL`, fixed `CR0`/`CR4` masks, `IA32_VMX_*_CTLS`, `IA32_VMX_EPT_VPID_CAP`, secondary/tertiary controls | `CPUID Fn8000_000A`, `EFER.SVME`, SVM feature bits, `VmcbClean`, `FlushByAsid`, `NRIPS`, decode-assist support | TLFS CPUID leaves `0x40000006`, `0x40000009`, `0x4000000A`, eVMCS version, direct virtual flush and enlightened TLB bits | hardcoded control words, Intel-only feature assumptions, unsupported nested feature exposure | possible legal control |
+| entry input state | guest/host CRs, RIP/RSP/RFLAGS, segment/access-right fields, VM-entry controls, VM-entry MSR-load list, entry interruption-info field | VMCB control area, save-state area, `EVENTINJ`, guest `EFER`, `RIP/RSP/RFLAGS`, segment state | eVMCS/eVMCB fields plus clean-field mask that decides whether L0 reloads memory | entry consumes stale or impossible guest/host state; injected event is incompatible with guest state | possible entry state |
+| native transition result | `CF`/`ZF`, `VMfailInvalid`, `VMfailValid`, VM-instruction error field, VM-entry failure class, VM-exit reason, exit qualification, IDT-vectoring and interruption fields | `EXITCODE`, `EXITINFO1`, `EXITINFO2`, `EXITINTINFO`, `nRIP`, decode-assist fields where valid, updated save-state | synthetic exit reason, nested VM-exit delivery, direct-flush synthetic exit when partition assist state requires it | collapsing instruction failure, entry failure, synthetic exit, and ordinary VM-exit into one "exit" label | possible native transition |
+| coherence and currentness action | `INVEPT`, `INVVPID`, EPTP, VPID, MTF restore edge, interruptibility update, old/new VMCS fields | `TLB_CONTROL`, ASID, `N_CR3`, `INVLPGA`, `INVLPGB`, `TLBSYNC`, VMCB clean-bit clear, old/new VMCB fields | eVMCS `CleanFields`, enlightened VMCB clean bit 31, direct virtual flush hypercall fields, partition assist page | table or field change never reaches executing hardware; stale virtual TLB survives nested context | possible coherent transition |
+| external bridge | CR3/PCID or ASID epoch, Windows region/read relation, ETW or ISR/DPC witness, engine tick/frame, endpoint comparator | same, plus AMD-native ASID/`N_CR3` and NPF payload retention | nested L0/L1/L2 owner, guest-visible TLFS feature state, hosted endpoint comparator | later bytes, interrupts, or behavior are used to fill a missing transition step | external bridge still needed |
 
-The analysis rule is strict. "VMX controls show EPT monitoring" is only `configured_policy_candidate` unless the trace also shows a current VMCS, legal control derivation, VM-entry success or failure class, native exit payload, and invalidation/currentness action. "AMD VMCB has NPT enabled" is only `configured_policy_candidate` unless `VMRUN`, `EXITCODE` or `EXITINFO*`, ASID, `N_CR3`, clean-bit state, and TLB action are joined. "Nested Hyper-V exposed enlightened VMCS" is only `nested_contract_candidate` unless the TLFS feature leaf, VP assist/eVMCS identity, clean-field state, synthetic or native exit, and virtual-TLB ownership are all named.
+The wording rule is strict:
 
-The invariant is consumed-control proof. A control object does not gain evidentiary force because it exists in memory; it gains force when the processor or nested owner consumed it across a legal transition and produced a replayable native result. The attacker leverage is control-page theater: leaving behind plausible VMCS/VMCB-like pages, copied enlightened structures, or stale clean-field state that looks authoritative without being the active authority. The defender observable is the transition edge that binds identity, legality, native payload, currentness action, and post-entry behavior. The sanity check is control-object substitution: keep the same dump and proposed sentence, then replace the active object with a copied, stale, or wrong-core object. If the sentence does not narrow, it was reading memory decoration rather than transition state.
+- "VMX controls show EPT monitoring" means only that monitoring was configured unless the trace also shows the current VMCS, legal controls, VM-entry result, native exit payload, and invalidation action.
+- "AMD VMCB has NPT enabled" means only that NPT was configured unless `VMRUN`, `EXITCODE` or `EXITINFO*`, ASID, `N_CR3`, clean-bit state, and TLB action are connected.
+- "Nested Hyper-V exposed enlightened VMCS" means only that nested virtualization metadata exists unless TLFS feature leaves, VP assist/eVMCS identity, clean-field state, synthetic or native exit, and virtual-TLB ownership are named.
+
+The rule is used-control evidence. A control object matters when the processor or nested owner actually used it across a legal transition and produced a replayable native result.
+
+Without that bridge, plausible VMCS/VMCB-like pages, copied enlightened structures, or stale clean-field state are only memory observations. The useful defensive evidence is the transition edge that binds identity, legality, native payload, currentness action, and post-entry behavior.
+
+The sanity check is control-object substitution. Keep the same dump and sentence, then replace the active object with a copied, stale, or wrong-core object. If the sentence does not narrow, it was reading memory decoration rather than transition state.
 
 ## Next
 
 Next, the series moves from control-state ownership into the real memory primitive: EPT/NPT. The focus becomes second-stage translation as an evidence-producing state machine, not just a convenient way to hide or reveal pages.
+
+## References
+
+- Intel, Intel 64 and IA-32 Architectures Software Developer's Manual: https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+- AMD, AMD64 Architecture Programmer's Manual Volume 2, System Programming, Rev. 3.44: https://docs.amd.com/v/u/en-US/24593_3.44_APM_Vol2
+- Microsoft, Hyper-V Top-Level Functional Specification: https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/tlfs
+- Microsoft, Virtualization-based Security overview for OEMs: https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/oem-vbs
+- Microsoft, Enable virtualization-based protection of code integrity: https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity
